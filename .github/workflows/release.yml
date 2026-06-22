@@ -1,0 +1,159 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next patch version
+        id: version
+        shell: pwsh
+        run: |
+          $tags = @(
+            git tag --list "0.1.*" | ForEach-Object {
+              $tag = [string]$_
+              if ($tag -match '^0\.1\.(\d+)$') {
+                [pscustomobject]@{
+                  Name = $tag
+                  Patch = [int]$Matches[1]
+                }
+              }
+            } | Sort-Object -Property Patch -Descending
+          )
+          if ($tags.Count -eq 0) {
+            $next = "0.1.0"
+            $previousTag = ""
+          } else {
+            $latest = $tags[0]
+            $patch = $latest.Patch + 1
+            $next = "0.1.$patch"
+            $previousTag = $latest.Name
+          }
+          "version=$next" >> $env:GITHUB_OUTPUT
+          "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
+
+      - name: Bake release version
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $repository = "${{ github.repository }}"
+          $parts = $repository.Split("/")
+          if ($parts.Count -ne 2) {
+            throw "Unexpected repository format: $repository"
+          }
+          $source = @(
+            "namespace CodexUsageTray",
+            "{",
+            "    internal static class BuildVersion",
+            "    {",
+            "        public const string Version = `"$version`";",
+            "        public const string GitHubOwner = `"$($parts[0])`";",
+            "        public const string GitHubRepo = `"$($parts[1])`";",
+            "    }",
+            "}"
+          ) -join [Environment]::NewLine
+          Set-Content -Path "src\BuildVersion.cs" -Value $source -Encoding UTF8
+
+      - name: Build executable
+        shell: pwsh
+        run: |
+          $source = "CodexUsageTray.cs"
+          $sourceDir = "src"
+          $icon = "icon.ico"
+          $exe = "CodexUsageTray.exe"
+
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Entrypoint source file not found: $source"
+          }
+          if (-not (Test-Path -LiteralPath $sourceDir)) {
+            throw "Source folder not found: $sourceDir"
+          }
+          if (-not (Test-Path -LiteralPath $icon)) {
+            throw "Icon file not found: $icon"
+          }
+
+          $sourceFiles = Get-ChildItem -LiteralPath $sourceDir -Filter "*.cs" |
+            Sort-Object Name |
+            Select-Object -ExpandProperty FullName
+          if (-not $sourceFiles) {
+            throw "No source files found in $sourceDir"
+          }
+
+          $candidates = @(
+            (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+            (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+          )
+          $compiler = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            throw "Could not find .NET Framework csc.exe."
+          }
+
+          $compilerArgs = @(
+            "/nologo",
+            "/target:winexe",
+            "/optimize+",
+            "/platform:anycpu",
+            "/win32icon:$icon",
+            "/out:$exe",
+            "/reference:System.dll",
+            "/reference:System.Core.dll",
+            "/reference:System.Drawing.dll",
+            "/reference:System.Windows.Forms.dll",
+            "/reference:System.Web.Extensions.dll",
+            $source
+          ) + $sourceFiles
+
+          & $compiler $compilerArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build failed with exit code $LASTEXITCODE."
+          }
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Build completed without creating $exe"
+          }
+
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $previousTag = "${{ steps.version.outputs.previous_tag }}"
+          if ([string]::IsNullOrWhiteSpace($previousTag)) {
+            $commits = @(git log --pretty=format:"- %s (%h)" --max-count=50)
+          } else {
+            $commits = @(git log --pretty=format:"- %s (%h)" "$previousTag..HEAD")
+          }
+          if ($commits.Count -eq 0) {
+            $commits = @("- No code changes since the previous release.")
+          }
+          $notes = @(
+            "## Changes",
+            ""
+          ) + $commits + @(
+            "",
+            "## Download",
+            "- ``CodexUsageTray.exe`` is the Windows tray app."
+          )
+          Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" `
+            "CodexUsageTray.exe" `
+            --title "${{ steps.version.outputs.version }}" `
+            --notes-file "release_notes.md" `
+            --latest

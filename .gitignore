@@ -1,0 +1,5 @@
+# Local build output
+*.exe
+
+# Local PowerShell scripts
+*.ps1
