@@ -50,7 +50,7 @@ namespace CodexUsageTray
             };
 
             notifyIcon = new NotifyIcon();
-            notifyIcon.Text = "Codex Usage: starting";
+            SetNotifyTooltip("Codex Usage: starting");
             notifyIcon.ContextMenuStrip = BuildContextMenu();
             notifyIcon.MouseClick += NotifyIcon_MouseClick;
             SetTrayIcon(IconRenderer.CreateUnknownIcon("..."));
@@ -144,7 +144,7 @@ namespace CodexUsageTray
             }
 
             refreshInProgress = true;
-            notifyIcon.Text = TrimTooltip("Codex Usage: refreshing");
+            SetNotifyTooltip("Codex Usage: refreshing");
 
             Task.Factory.StartNew(
                 delegate { return CodexRateLimitClient.FetchUsage(); },
@@ -180,7 +180,7 @@ namespace CodexUsageTray
             if (!string.IsNullOrEmpty(snapshot.ErrorMessage))
             {
                 SetTrayIcon(IconRenderer.CreateErrorIcon());
-                notifyIcon.Text = TrimTooltip("Codex Usage: " + snapshot.ErrorMessage);
+                SetNotifyTooltip("Codex Usage: " + snapshot.ErrorMessage);
                 if (showBalloon)
                 {
                     notifyIcon.ShowBalloonTip(3000, "Codex Usage", snapshot.ErrorMessage, ToolTipIcon.Warning);
@@ -192,7 +192,7 @@ namespace CodexUsageTray
             LimitWindow iconWindow = GetIconWindow(snapshot);
             int remaining = iconWindow != null ? ClampPercent(100.0 - iconWindow.UsedPercent) : 0;
             SetTrayIcon(IconRenderer.CreatePercentIcon(remaining, settings));
-            notifyIcon.Text = TrimTooltip(BuildNativeTooltip(snapshot));
+            SetNotifyTooltip(BuildNativeTooltip(snapshot));
             usagePopup.UpdateSnapshot(snapshot);
 
             if (showBalloon)
@@ -221,7 +221,9 @@ namespace CodexUsageTray
 
         private static string BuildNativeTooltip(UsageSnapshot snapshot)
         {
-            return "Codex: W " + FormatCompactWindow(snapshot.Weekly) + " | 5h " + FormatCompactWindow(snapshot.FiveHour);
+            return "Codex Usage Remaining" + Environment.NewLine +
+                "Weekly: " + FormatNativeWindow(snapshot.Weekly) + Environment.NewLine +
+                "5h: " + FormatNativeWindow(snapshot.FiveHour);
         }
 
         private static string FormatWindow(LimitWindow window)
@@ -238,15 +240,15 @@ namespace CodexUsageTray
             return remaining + "% left" + reset;
         }
 
-        private static string FormatCompactWindow(LimitWindow window)
+        private static string FormatNativeWindow(LimitWindow window)
         {
             if (window == null)
             {
-                return "?";
+                return "unknown";
             }
 
             string reset = window.ResetAfterSeconds.HasValue
-                ? " " + TimeFormatter.FormatDuration(window.ResetAfterSeconds.Value)
+                ? " (Resets in " + TimeFormatter.FormatDuration(window.ResetAfterSeconds.Value) + ")"
                 : "";
             return window.RemainingPercent + "%" + reset;
         }
@@ -259,6 +261,23 @@ namespace CodexUsageTray
             }
 
             return value.Length > 63 ? value.Substring(0, 63) : value;
+        }
+
+        private void SetNotifyTooltip(string value)
+        {
+            notifyIcon.Text = TrimTooltip(FirstTooltipLine(value));
+            NativeTrayTooltip.TrySetText(notifyIcon, value);
+        }
+
+        private static string FirstTooltipLine(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return "Codex Usage";
+            }
+
+            int lineBreak = value.IndexOfAny(new char[] { '\r', '\n' });
+            return lineBreak >= 0 ? value.Substring(0, lineBreak) : value;
         }
 
         private void SetTrayIcon(Icon icon)
