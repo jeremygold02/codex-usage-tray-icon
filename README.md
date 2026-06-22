@@ -14,3 +14,9 @@ Download the latest `CodexUsageTray.exe` from the [GitHub releases page](https:/
 
 - The tray icon always shows the selected remaining-usage percentage.
 - The settings window lets you choose whether the tray percentage reflects weekly or 5h remaining usage.
+
+## Attribution
+
+Codex Usage Tray is inspired by the tray display style of [Bluetooth Battery Monitor](https://www.bluetoothgoodies.com/) from Luculent Systems, LLC.
+
+Bluetooth Battery Monitor is © 2017-2026 Luculent Systems, LLC. All Rights Reserved.
