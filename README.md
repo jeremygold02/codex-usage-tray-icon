@@ -14,4 +14,3 @@ Download the latest `CodexUsageTray.exe` from the [GitHub releases page](https:/
 
 - The tray icon always shows the selected remaining-usage percentage.
 - The settings window lets you choose whether the tray percentage reflects weekly or 5h remaining usage.
-- GitHub releases are built by the repository workflow; local `*.ps1` scripts and `*.exe` files are intentionally ignored.
