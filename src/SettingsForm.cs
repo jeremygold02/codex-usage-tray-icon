@@ -31,6 +31,8 @@ namespace CodexUsageTray
         private PictureBox lowPreview;
         private PictureBox normalPreview;
         private Button checkUpdatesButton;
+        private Label versionLabel;
+        private Label updateStatusLabel;
 
         public event EventHandler SettingsApplied;
         public event EventHandler CheckUpdatesRequested;
@@ -121,6 +123,13 @@ namespace CodexUsageTray
             startWithWindowsCheckBox = CreateCheckBox("Start with Windows", 22, 54, 174);
             helpGroup.Controls.Add(startWithWindowsCheckBox);
             Controls.Add(helpGroup);
+
+            versionLabel = CreateLabel("Version " + AppVersion.Current, 22, 444, 110);
+            Controls.Add(versionLabel);
+
+            updateStatusLabel = CreateLabel("", 136, 444, 232);
+            updateStatusLabel.TextAlign = ContentAlignment.TopRight;
+            Controls.Add(updateStatusLabel);
 
             Button defaultsButton = CreateButton("Defaults", 22, 470, 78);
             defaultsButton.Click += delegate { RestoreDefaults(); };
@@ -219,6 +228,16 @@ namespace CodexUsageTray
 
             checkUpdatesButton.Enabled = !busy;
             checkUpdatesButton.Text = busy ? busyText : "Check Updates";
+        }
+
+        public void SetUpdateStatus(string status)
+        {
+            if (updateStatusLabel == null)
+            {
+                return;
+            }
+
+            updateStatusLabel.Text = status ?? "";
         }
 
         private void UpdatePreviews()

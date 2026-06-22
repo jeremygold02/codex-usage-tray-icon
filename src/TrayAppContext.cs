@@ -32,6 +32,7 @@ namespace CodexUsageTray
         private bool refreshInProgress;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
+        private string updateStatusText = "";
         private SettingsForm settingsForm;
         private System.Windows.Forms.Timer startupUiTimer;
 
@@ -338,6 +339,7 @@ namespace CodexUsageTray
             }
 
             settingsForm = new SettingsForm(settings);
+            settingsForm.SetUpdateStatus(updateStatusText);
             settingsForm.SettingsApplied += delegate
             {
                 ApplyStartupSetting();
@@ -384,6 +386,7 @@ namespace CodexUsageTray
 
             updateCheckInProgress = true;
             SetSettingsUpdateButtonState(true, "Checking...");
+            SetUpdateStatusText("Checking for updates...");
 
             Task.Factory.StartNew(
                 delegate { return UpdateService.CheckForUpdate(); },
@@ -414,6 +417,7 @@ namespace CodexUsageTray
         {
             if (info == null)
             {
+                SetUpdateStatusText("Could not read update information.");
                 if (interactive)
                 {
                     MessageBox.Show(GetSettingsOwner(), "Could not read update information.", "Codex Usage Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -423,12 +427,15 @@ namespace CodexUsageTray
 
             if (!info.UpdateAvailable)
             {
+                SetUpdateStatusText("Up to date: " + info.LatestVersion);
                 if (interactive)
                 {
                     MessageBox.Show(GetSettingsOwner(), info.Message, "Codex Usage Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 return;
             }
+
+            SetUpdateStatusText("Version " + info.LatestVersion + " available");
 
             if (!interactive)
             {
@@ -476,6 +483,7 @@ namespace CodexUsageTray
 
             updateInstallInProgress = true;
             SetSettingsUpdateButtonState(true, "Installing...");
+            SetUpdateStatusText("Installing version " + info.LatestVersion + "...");
 
             Task.Factory.StartNew(
                 delegate { return UpdateService.InstallUpdate(info); },
@@ -504,13 +512,15 @@ namespace CodexUsageTray
 
         private void HandleUpdateError(AggregateException exception, bool interactive)
         {
+            Exception baseException = exception != null ? exception.GetBaseException() : null;
+            string message = baseException != null ? baseException.Message : "Unknown update error.";
+            SetUpdateStatusText("Update check failed.");
+
             if (!interactive)
             {
                 return;
             }
 
-            Exception baseException = exception != null ? exception.GetBaseException() : null;
-            string message = baseException != null ? baseException.Message : "Unknown update error.";
             MessageBox.Show(GetSettingsOwner(), "Could not check for updates:" + Environment.NewLine + Environment.NewLine + message, "Codex Usage Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
@@ -524,6 +534,15 @@ namespace CodexUsageTray
             if (settingsForm != null && !settingsForm.IsDisposed)
             {
                 settingsForm.SetUpdateButtonState(busy, busyText);
+            }
+        }
+
+        private void SetUpdateStatusText(string status)
+        {
+            updateStatusText = status ?? "";
+            if (settingsForm != null && !settingsForm.IsDisposed)
+            {
+                settingsForm.SetUpdateStatus(updateStatusText);
             }
         }
 
