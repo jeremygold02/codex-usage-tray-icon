@@ -29,6 +29,8 @@ namespace CodexUsageTray
 
         private Icon currentIcon;
         private UsageSnapshot lastSnapshot;
+        private int? lastWeeklyThresholdLevel;
+        private int? lastFiveHourThresholdLevel;
         private bool refreshInProgress;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
@@ -196,8 +198,9 @@ namespace CodexUsageTray
             SetTrayIcon(IconRenderer.CreatePercentIcon(remaining, settings));
             SetNotifyTooltip(BuildNativeTooltip(snapshot));
             usagePopup.UpdateSnapshot(snapshot);
+            bool thresholdBalloonShown = UpdateThresholdNotifications(snapshot);
 
-            if (showBalloon)
+            if (showBalloon && !thresholdBalloonShown)
             {
                 notifyIcon.ShowBalloonTip(2500, "Codex Usage", BuildTooltip(snapshot), ToolTipIcon.Info);
             }
@@ -305,6 +308,92 @@ namespace CodexUsageTray
                 : snapshot.Weekly;
         }
 
+        private bool UpdateThresholdNotifications(UsageSnapshot snapshot)
+        {
+            int weeklyLevel = GetThresholdLevel(snapshot != null ? snapshot.Weekly : null);
+            int fiveHourLevel = GetThresholdLevel(snapshot != null ? snapshot.FiveHour : null);
+
+            bool shouldNotify = settings.ThresholdNotifications;
+            bool weeklyAlert = shouldNotify && IsNewThresholdLevel(lastWeeklyThresholdLevel, weeklyLevel);
+            bool fiveHourAlert = shouldNotify && IsNewThresholdLevel(lastFiveHourThresholdLevel, fiveHourLevel);
+
+            lastWeeklyThresholdLevel = weeklyLevel;
+            lastFiveHourThresholdLevel = fiveHourLevel;
+
+            if (!weeklyAlert && !fiveHourAlert)
+            {
+                return false;
+            }
+
+            StringBuilder message = new StringBuilder();
+            int highestLevel = 0;
+            if (weeklyAlert)
+            {
+                AppendThresholdLine(message, "Weekly", snapshot.Weekly, weeklyLevel);
+                highestLevel = Math.Max(highestLevel, weeklyLevel);
+            }
+            if (fiveHourAlert)
+            {
+                AppendThresholdLine(message, "5h", snapshot.FiveHour, fiveHourLevel);
+                highestLevel = Math.Max(highestLevel, fiveHourLevel);
+            }
+
+            notifyIcon.ShowBalloonTip(
+                5000,
+                highestLevel >= 2 ? "Codex Usage Critical" : "Codex Usage Low",
+                message.ToString(),
+                ToolTipIcon.Warning);
+            return true;
+        }
+
+        private int GetThresholdLevel(LimitWindow window)
+        {
+            if (window == null)
+            {
+                return 0;
+            }
+
+            int remaining = window.RemainingPercent;
+            if (remaining <= settings.CriticalThreshold)
+            {
+                return 2;
+            }
+            if (remaining <= settings.LowThreshold)
+            {
+                return 1;
+            }
+
+            return 0;
+        }
+
+        private static bool IsNewThresholdLevel(int? previousLevel, int currentLevel)
+        {
+            return previousLevel.HasValue && currentLevel > previousLevel.Value;
+        }
+
+        private static void AppendThresholdLine(StringBuilder message, string label, LimitWindow window, int level)
+        {
+            if (message.Length > 0)
+            {
+                message.AppendLine();
+            }
+
+            string severity = level >= 2 ? "critical" : "low";
+            int remaining = window != null ? window.RemainingPercent : 0;
+            message.Append(label);
+            message.Append(" usage is ");
+            message.Append(severity);
+            message.Append(": ");
+            message.Append(remaining);
+            message.Append("% remaining.");
+        }
+
+        private void ResetThresholdNotificationState()
+        {
+            lastWeeklyThresholdLevel = null;
+            lastFiveHourThresholdLevel = null;
+        }
+
         private void ToggleUsagePopup()
         {
             if (usagePopup.Visible)
@@ -346,6 +435,7 @@ namespace CodexUsageTray
                 settings.Save();
                 refreshTimer.Interval = Math.Max(30, settings.RefreshSeconds) * 1000;
                 usagePopup.ApplySettings(settings);
+                ResetThresholdNotificationState();
                 if (lastSnapshot != null)
                 {
                     ApplySnapshot(lastSnapshot, false);

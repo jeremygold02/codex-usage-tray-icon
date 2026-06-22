@@ -27,6 +27,7 @@ namespace CodexUsageTray
         private CheckBox showResetTimesCheckBox;
         private CheckBox showLastUpdatedCheckBox;
         private CheckBox startWithWindowsCheckBox;
+        private CheckBox thresholdNotificationsCheckBox;
         private PictureBox criticalPreview;
         private PictureBox lowPreview;
         private PictureBox normalPreview;
@@ -101,6 +102,8 @@ namespace CodexUsageTray
             refreshNumeric = CreateNumeric(108, 183, 56, 30, 3600);
             notificationGroup.Controls.Add(refreshNumeric);
             notificationGroup.Controls.Add(CreateLabel("sec", 170, 186, 28));
+            thresholdNotificationsCheckBox = CreateCheckBox("Threshold alerts", 220, 183, 126);
+            notificationGroup.Controls.Add(thresholdNotificationsCheckBox);
             Controls.Add(notificationGroup);
 
             GroupBox colorGroup = CreateGroup("Color Settings", 14, 246, 356, 86);
@@ -168,6 +171,7 @@ namespace CodexUsageTray
             showResetTimesCheckBox.Checked = settings.ShowPopupResetTimes;
             showLastUpdatedCheckBox.Checked = settings.ShowPopupLastUpdated;
             startWithWindowsCheckBox.Checked = StartupManager.IsEnabled();
+            thresholdNotificationsCheckBox.Checked = settings.ThresholdNotifications;
             refreshNumeric.Value = Math.Max(30, settings.RefreshSeconds);
             SelectTheme(settings.Theme);
             UpdatePreviews();
@@ -194,6 +198,7 @@ namespace CodexUsageTray
             settings.ShowPopupResetTimes = showResetTimesCheckBox.Checked;
             settings.ShowPopupLastUpdated = showLastUpdatedCheckBox.Checked;
             settings.StartWithWindows = startWithWindowsCheckBox.Checked;
+            settings.ThresholdNotifications = thresholdNotificationsCheckBox.Checked;
             settings.RefreshSeconds = (int)refreshNumeric.Value;
             settings.Theme = GetSelectedTheme();
 
@@ -213,6 +218,7 @@ namespace CodexUsageTray
             showResetTimesCheckBox.Checked = defaults.ShowPopupResetTimes;
             showLastUpdatedCheckBox.Checked = defaults.ShowPopupLastUpdated;
             startWithWindowsCheckBox.Checked = defaults.StartWithWindows;
+            thresholdNotificationsCheckBox.Checked = defaults.ThresholdNotifications;
             refreshNumeric.Value = defaults.RefreshSeconds;
             SelectTheme(defaults.Theme);
             ApplyTheme(this, AppSettings.IsDarkTheme(GetSelectedTheme()));
