@@ -68,10 +68,7 @@ namespace CodexUsageTray
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 g.Clear(Color.Transparent);
-                using (GraphicsPath backgroundPath = CreateRoundedRectanglePath(new RectangleF(0, 0, iconWidth, iconHeight), 5.0f))
-                {
-                    g.FillPath(backgroundBrush, backgroundPath);
-                }
+                g.FillRectangle(backgroundBrush, -2, -2, iconWidth + 4, iconHeight + 4);
 
                 if (!string.IsNullOrEmpty(text))
                 {
