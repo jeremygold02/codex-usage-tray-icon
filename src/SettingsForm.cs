@@ -26,6 +26,7 @@ namespace CodexUsageTray
         private ComboBox themeCombo;
         private CheckBox showResetTimesCheckBox;
         private CheckBox showLastUpdatedCheckBox;
+        private CheckBox startWithWindowsCheckBox;
         private PictureBox criticalPreview;
         private PictureBox lowPreview;
         private PictureBox normalPreview;
@@ -38,7 +39,7 @@ namespace CodexUsageTray
         {
             this.settings = settings;
             Text = "Codex Usage Tray Settings";
-            ClientSize = new Size(384, 488);
+            ClientSize = new Size(384, 514);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -112,18 +113,20 @@ namespace CodexUsageTray
             colorGroup.Controls.Add(colorBarsCheckBox);
             Controls.Add(colorGroup);
 
-            GroupBox helpGroup = CreateGroup("Popup / Menu", 14, 346, 356, 66);
+            GroupBox helpGroup = CreateGroup("Popup / Menu", 14, 346, 356, 92);
             showLastUpdatedCheckBox = CreateCheckBox("Show last-updated times", 22, 28, 174);
             helpGroup.Controls.Add(showLastUpdatedCheckBox);
             showResetTimesCheckBox = CreateCheckBox("Show reset times", 202, 28, 132);
             helpGroup.Controls.Add(showResetTimesCheckBox);
+            startWithWindowsCheckBox = CreateCheckBox("Start with Windows", 22, 54, 174);
+            helpGroup.Controls.Add(startWithWindowsCheckBox);
             Controls.Add(helpGroup);
 
-            Button defaultsButton = CreateButton("Defaults", 22, 444, 78);
+            Button defaultsButton = CreateButton("Defaults", 22, 470, 78);
             defaultsButton.Click += delegate { RestoreDefaults(); };
             Controls.Add(defaultsButton);
 
-            checkUpdatesButton = CreateButton("Check Updates", 108, 444, 100);
+            checkUpdatesButton = CreateButton("Check Updates", 108, 470, 100);
             checkUpdatesButton.Click += delegate
             {
                 if (CheckUpdatesRequested != null)
@@ -133,7 +136,7 @@ namespace CodexUsageTray
             };
             Controls.Add(checkUpdatesButton);
 
-            Button okButton = CreateButton("OK", 216, 444, 76);
+            Button okButton = CreateButton("OK", 216, 470, 76);
             okButton.Click += delegate
             {
                 ApplyToSettings();
@@ -141,7 +144,7 @@ namespace CodexUsageTray
             };
             Controls.Add(okButton);
 
-            Button cancelButton = CreateButton("Cancel", 300, 444, 76);
+            Button cancelButton = CreateButton("Cancel", 300, 470, 76);
             cancelButton.Click += delegate { Close(); };
             Controls.Add(cancelButton);
         }
@@ -155,6 +158,7 @@ namespace CodexUsageTray
             colorBarsCheckBox.Checked = settings.ColorBars;
             showResetTimesCheckBox.Checked = settings.ShowPopupResetTimes;
             showLastUpdatedCheckBox.Checked = settings.ShowPopupLastUpdated;
+            startWithWindowsCheckBox.Checked = StartupManager.IsEnabled();
             refreshNumeric.Value = Math.Max(30, settings.RefreshSeconds);
             SelectTheme(settings.Theme);
             UpdatePreviews();
@@ -180,6 +184,7 @@ namespace CodexUsageTray
             settings.ColorBars = colorBarsCheckBox.Checked;
             settings.ShowPopupResetTimes = showResetTimesCheckBox.Checked;
             settings.ShowPopupLastUpdated = showLastUpdatedCheckBox.Checked;
+            settings.StartWithWindows = startWithWindowsCheckBox.Checked;
             settings.RefreshSeconds = (int)refreshNumeric.Value;
             settings.Theme = GetSelectedTheme();
 
@@ -198,6 +203,7 @@ namespace CodexUsageTray
             colorBarsCheckBox.Checked = defaults.ColorBars;
             showResetTimesCheckBox.Checked = defaults.ShowPopupResetTimes;
             showLastUpdatedCheckBox.Checked = defaults.ShowPopupLastUpdated;
+            startWithWindowsCheckBox.Checked = defaults.StartWithWindows;
             refreshNumeric.Value = defaults.RefreshSeconds;
             SelectTheme(defaults.Theme);
             ApplyTheme(this, AppSettings.IsDarkTheme(GetSelectedTheme()));

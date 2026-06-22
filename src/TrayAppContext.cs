@@ -339,6 +339,7 @@ namespace CodexUsageTray
             settingsForm = new SettingsForm(settings);
             settingsForm.SettingsApplied += delegate
             {
+                ApplyStartupSetting();
                 settings.Save();
                 refreshTimer.Interval = Math.Max(30, settings.RefreshSeconds) * 1000;
                 usagePopup.ApplySettings(settings);
@@ -349,6 +350,24 @@ namespace CodexUsageTray
             };
             settingsForm.CheckUpdatesRequested += delegate { CheckForUpdates(true); };
             settingsForm.Show();
+        }
+
+        private void ApplyStartupSetting()
+        {
+            try
+            {
+                StartupManager.SetEnabled(settings.StartWithWindows);
+            }
+            catch (Exception ex)
+            {
+                settings.StartWithWindows = StartupManager.IsEnabled();
+                MessageBox.Show(
+                    GetSettingsOwner(),
+                    "Could not update Windows startup setting:" + Environment.NewLine + Environment.NewLine + ex.Message,
+                    "Codex Usage Settings",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
         }
 
         private void CheckForUpdates(bool interactive)

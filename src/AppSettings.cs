@@ -31,6 +31,7 @@ namespace CodexUsageTray
         public bool ColorBars { get; set; }
         public bool ShowPopupResetTimes { get; set; }
         public bool ShowPopupLastUpdated { get; set; }
+        public bool StartWithWindows { get; set; }
         public int RefreshSeconds { get; set; }
         public string Theme { get; set; }
 
@@ -44,6 +45,7 @@ namespace CodexUsageTray
             ColorBars = true;
             ShowPopupResetTimes = true;
             ShowPopupLastUpdated = true;
+            StartWithWindows = false;
             RefreshSeconds = 300;
             Theme = ThemeSystem;
         }
