@@ -43,6 +43,7 @@ namespace CodexUsageTray
             dispatcher.CreateControl();
             settings = AppSettings.Load();
             usagePopup = new UsagePopup(settings);
+            usagePopup.RefreshRequested += delegate { RefreshUsage(false); };
             usagePopup.SettingsRequested += delegate
             {
                 usagePopup.Hide();

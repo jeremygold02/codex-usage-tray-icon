@@ -18,9 +18,12 @@ namespace CodexUsageTray
     {
         private AppSettings settings;
         private UsageSnapshot snapshot;
+        private Rectangle refreshBounds;
         private Rectangle settingsBounds;
+        private bool refreshHover;
         private bool settingsHover;
 
+        public event EventHandler RefreshRequested;
         public event EventHandler SettingsRequested;
 
         public UsagePopup(AppSettings settings)
@@ -88,7 +91,14 @@ namespace CodexUsageTray
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (settingsBounds.Contains(e.Location))
+            if (refreshBounds.Contains(e.Location))
+            {
+                if (RefreshRequested != null)
+                {
+                    RefreshRequested(this, EventArgs.Empty);
+                }
+            }
+            else if (settingsBounds.Contains(e.Location))
             {
                 if (SettingsRequested != null)
                 {
@@ -100,11 +110,17 @@ namespace CodexUsageTray
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            bool hover = settingsBounds.Contains(e.Location);
-            Cursor = hover ? Cursors.Hand : Cursors.Default;
-            if (settingsHover != hover)
+            bool refreshIsHover = refreshBounds.Contains(e.Location);
+            bool settingsIsHover = settingsBounds.Contains(e.Location);
+            Cursor = refreshIsHover || settingsIsHover ? Cursors.Hand : Cursors.Default;
+            if (refreshHover != refreshIsHover)
             {
-                settingsHover = hover;
+                refreshHover = refreshIsHover;
+                Invalidate(refreshBounds);
+            }
+            if (settingsHover != settingsIsHover)
+            {
+                settingsHover = settingsIsHover;
                 Invalidate(settingsBounds);
             }
         }
@@ -113,6 +129,11 @@ namespace CodexUsageTray
         {
             base.OnMouseLeave(e);
             Cursor = Cursors.Default;
+            if (refreshHover)
+            {
+                refreshHover = false;
+                Invalidate(refreshBounds);
+            }
             if (settingsHover)
             {
                 settingsHover = false;
@@ -232,11 +253,20 @@ namespace CodexUsageTray
 
         private void DrawActionGlyphs(Graphics g, Brush brush)
         {
+            refreshBounds = new Rectangle(332, 9, 22, 22);
             settingsBounds = new Rectangle(360, 9, 22, 22);
-            bool hover = settingsHover || settingsBounds.Contains(PointToClient(Cursor.Position));
+            bool refreshIsHover = refreshHover || refreshBounds.Contains(PointToClient(Cursor.Position));
+            bool settingsIsHover = settingsHover || settingsBounds.Contains(PointToClient(Cursor.Position));
             bool dark = IsDarkTheme();
 
-            if (hover)
+            if (refreshIsHover)
+            {
+                using (Brush hoverBrush = new SolidBrush(dark ? Color.FromArgb(92, 92, 92) : Color.FromArgb(220, 220, 220)))
+                {
+                    g.FillEllipse(hoverBrush, refreshBounds);
+                }
+            }
+            if (settingsIsHover)
             {
                 using (Brush hoverBrush = new SolidBrush(dark ? Color.FromArgb(92, 92, 92) : Color.FromArgb(220, 220, 220)))
                 {
@@ -244,12 +274,17 @@ namespace CodexUsageTray
                 }
             }
 
+            Color refreshColor = dark
+                ? (refreshIsHover ? Color.White : Color.FromArgb(220, 220, 220))
+                : (refreshIsHover ? Color.Black : Color.FromArgb(72, 72, 72));
             Color gearColor = dark
-                ? (hover ? Color.White : Color.FromArgb(220, 220, 220))
-                : (hover ? Color.Black : Color.FromArgb(72, 72, 72));
-            using (Pen pen = new Pen(gearColor, 1.2f))
+                ? (settingsIsHover ? Color.White : Color.FromArgb(220, 220, 220))
+                : (settingsIsHover ? Color.Black : Color.FromArgb(72, 72, 72));
+            using (Pen refreshPen = new Pen(refreshColor, 1.4f))
+            using (Pen gearPen = new Pen(gearColor, 1.2f))
             {
-                DrawSettingsIcon(g, pen, settingsBounds);
+                DrawRefreshIcon(g, refreshPen, refreshBounds);
+                DrawSettingsIcon(g, gearPen, settingsBounds);
             }
         }
 
@@ -280,6 +315,20 @@ namespace CodexUsageTray
             }
 
             g.DrawEllipse(pen, centerX - 2.2f, centerY - 2.2f, 4.4f, 4.4f);
+        }
+
+        private static void DrawRefreshIcon(Graphics g, Pen pen, Rectangle bounds)
+        {
+            RectangleF arcBounds = new RectangleF(bounds.Left + 5.0f, bounds.Top + 5.0f, bounds.Width - 10.0f, bounds.Height - 10.0f);
+            g.DrawArc(pen, arcBounds, 35, 285);
+
+            PointF tip = new PointF(bounds.Right - 5.0f, bounds.Top + 9.0f);
+            PointF wingA = new PointF(tip.X - 4.2f, tip.Y - 0.8f);
+            PointF wingB = new PointF(tip.X - 1.4f, tip.Y + 3.8f);
+            using (Brush brush = new SolidBrush(pen.Color))
+            {
+                g.FillPolygon(brush, new PointF[] { tip, wingA, wingB });
+            }
         }
 
         private static GraphicsPath CreateGearPath(float centerX, float centerY, float outerRadius, float rootRadius, int teeth)
