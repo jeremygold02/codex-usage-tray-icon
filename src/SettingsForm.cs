@@ -21,6 +21,7 @@ namespace CodexUsageTray
         private NumericUpDown criticalNumeric;
         private NumericUpDown lowNumeric;
         private NumericUpDown refreshNumeric;
+        private NumericUpDown idleRefreshNumeric;
         private RadioButton weeklyRadio;
         private RadioButton fiveHourRadio;
         private ComboBox themeCombo;
@@ -98,11 +99,15 @@ namespace CodexUsageTray
             notificationGroup.Controls.Add(weeklyRadio);
             notificationGroup.Controls.Add(fiveHourRadio);
 
-            notificationGroup.Controls.Add(CreateLabel("Refresh every", 20, 186, 88));
-            refreshNumeric = CreateNumeric(108, 183, 56, 30, 3600);
+            notificationGroup.Controls.Add(CreateLabel("Active", 20, 186, 44));
+            refreshNumeric = CreateNumeric(68, 183, 56, 30, 3600);
             notificationGroup.Controls.Add(refreshNumeric);
-            notificationGroup.Controls.Add(CreateLabel("sec", 170, 186, 28));
-            thresholdNotificationsCheckBox = CreateCheckBox("Threshold alerts", 220, 183, 126);
+            notificationGroup.Controls.Add(CreateLabel("sec", 130, 186, 28));
+            notificationGroup.Controls.Add(CreateLabel("Idle (0=off)", 164, 186, 76));
+            idleRefreshNumeric = CreateNumeric(240, 183, 56, 0, 7200);
+            notificationGroup.Controls.Add(idleRefreshNumeric);
+            notificationGroup.Controls.Add(CreateLabel("sec", 302, 186, 28));
+            thresholdNotificationsCheckBox = CreateCheckBox("Alerts", 292, 154, 58);
             notificationGroup.Controls.Add(thresholdNotificationsCheckBox);
             Controls.Add(notificationGroup);
 
@@ -173,6 +178,7 @@ namespace CodexUsageTray
             startWithWindowsCheckBox.Checked = StartupManager.IsEnabled();
             thresholdNotificationsCheckBox.Checked = settings.ThresholdNotifications;
             refreshNumeric.Value = Math.Max(30, settings.RefreshSeconds);
+            idleRefreshNumeric.Value = Math.Max(0, settings.IdleRefreshSeconds);
             SelectTheme(settings.Theme);
             UpdatePreviews();
 
@@ -200,6 +206,12 @@ namespace CodexUsageTray
             settings.StartWithWindows = startWithWindowsCheckBox.Checked;
             settings.ThresholdNotifications = thresholdNotificationsCheckBox.Checked;
             settings.RefreshSeconds = (int)refreshNumeric.Value;
+            settings.IdleRefreshSeconds = (int)idleRefreshNumeric.Value;
+            if (settings.IdleRefreshSeconds > 0 && settings.IdleRefreshSeconds < settings.RefreshSeconds)
+            {
+                settings.IdleRefreshSeconds = settings.RefreshSeconds;
+                idleRefreshNumeric.Value = settings.IdleRefreshSeconds;
+            }
             settings.Theme = GetSelectedTheme();
 
             if (SettingsApplied != null)
@@ -220,6 +232,7 @@ namespace CodexUsageTray
             startWithWindowsCheckBox.Checked = defaults.StartWithWindows;
             thresholdNotificationsCheckBox.Checked = defaults.ThresholdNotifications;
             refreshNumeric.Value = defaults.RefreshSeconds;
+            idleRefreshNumeric.Value = defaults.IdleRefreshSeconds;
             SelectTheme(defaults.Theme);
             ApplyTheme(this, AppSettings.IsDarkTheme(GetSelectedTheme()));
             UpdatePreviews();

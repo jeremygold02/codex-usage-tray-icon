@@ -16,7 +16,7 @@ namespace CodexUsageTray
 {
     internal sealed class AppSettings
     {
-        public const int CurrentSettingsVersion = 3;
+        public const int CurrentSettingsVersion = 4;
         public const string IconMetricWeekly = "Weekly";
         public const string IconMetricFiveHour = "FiveHour";
         public const string ThemeSystem = "System Default";
@@ -34,6 +34,7 @@ namespace CodexUsageTray
         public bool StartWithWindows { get; set; }
         public bool ThresholdNotifications { get; set; }
         public int RefreshSeconds { get; set; }
+        public int IdleRefreshSeconds { get; set; }
         public string Theme { get; set; }
 
         public AppSettings()
@@ -49,6 +50,7 @@ namespace CodexUsageTray
             StartWithWindows = false;
             ThresholdNotifications = false;
             RefreshSeconds = 300;
+            IdleRefreshSeconds = 0;
             Theme = ThemeSystem;
         }
 
@@ -111,6 +113,22 @@ namespace CodexUsageTray
             if (RefreshSeconds < 30)
             {
                 RefreshSeconds = 30;
+            }
+            else if (RefreshSeconds > 3600)
+            {
+                RefreshSeconds = 3600;
+            }
+            if (IdleRefreshSeconds < 0)
+            {
+                IdleRefreshSeconds = 0;
+            }
+            else if (IdleRefreshSeconds > 7200)
+            {
+                IdleRefreshSeconds = 7200;
+            }
+            else if (IdleRefreshSeconds > 0 && IdleRefreshSeconds < RefreshSeconds)
+            {
+                IdleRefreshSeconds = RefreshSeconds;
             }
             if (string.IsNullOrEmpty(Theme))
             {

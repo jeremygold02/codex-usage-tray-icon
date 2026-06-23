@@ -17,7 +17,7 @@ namespace CodexUsageTray
 {
     internal sealed class TrayAppContext : ApplicationContext
     {
-        private const int DefaultRefreshSeconds = 300;
+        private const int ActivityPollSeconds = 30;
 
         private readonly NotifyIcon notifyIcon;
         private readonly System.Windows.Forms.Timer refreshTimer;
@@ -31,6 +31,7 @@ namespace CodexUsageTray
         private UsageSnapshot lastSnapshot;
         private int? lastWeeklyThresholdLevel;
         private int? lastFiveHourThresholdLevel;
+        private DateTime lastRefreshStartedAt = DateTime.MinValue;
         private bool refreshInProgress;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
@@ -61,11 +62,11 @@ namespace CodexUsageTray
             notifyIcon.Visible = true;
 
             refreshTimer = new System.Windows.Forms.Timer();
-            refreshTimer.Interval = Math.Max(30, settings.RefreshSeconds) * 1000;
-            refreshTimer.Tick += delegate { RefreshUsage(false); };
+            refreshTimer.Interval = ActivityPollSeconds * 1000;
+            refreshTimer.Tick += delegate { RefreshUsageIfDue(false); };
             refreshTimer.Start();
 
-            RefreshUsage(false);
+            RefreshUsageIfDue(false);
             CheckForUpdates(false);
             if (showUsageOnStart || showSettingsOnStart)
             {
@@ -148,6 +149,7 @@ namespace CodexUsageTray
             }
 
             refreshInProgress = true;
+            lastRefreshStartedAt = DateTime.Now;
             SetNotifyTooltip("Codex Usage: refreshing");
 
             Task.Factory.StartNew(
@@ -175,6 +177,45 @@ namespace CodexUsageTray
                     }));
                 }
             });
+        }
+
+        private void RefreshUsageIfDue(bool showBalloon)
+        {
+            int refreshSeconds = GetCurrentRefreshSeconds();
+            if (refreshSeconds <= 0)
+            {
+                ApplyWaitingForCodexState();
+                return;
+            }
+
+            if (lastRefreshStartedAt != DateTime.MinValue &&
+                (DateTime.Now - lastRefreshStartedAt).TotalSeconds < refreshSeconds)
+            {
+                return;
+            }
+
+            RefreshUsage(showBalloon);
+        }
+
+        private int GetCurrentRefreshSeconds()
+        {
+            if (CodexActivityMonitor.IsCodexRunning())
+            {
+                return Math.Max(30, settings.RefreshSeconds);
+            }
+
+            return settings.IdleRefreshSeconds <= 0 ? 0 : Math.Max(60, settings.IdleRefreshSeconds);
+        }
+
+        private void ApplyWaitingForCodexState()
+        {
+            if (lastSnapshot != null || refreshInProgress)
+            {
+                return;
+            }
+
+            SetNotifyTooltip("Codex Usage: waiting for Codex");
+            usagePopup.UpdateSnapshot(UsageSnapshot.FromError("Waiting for Codex to start..."));
         }
 
         private void ApplySnapshot(UsageSnapshot snapshot, bool showBalloon)
@@ -433,7 +474,6 @@ namespace CodexUsageTray
             {
                 ApplyStartupSetting();
                 settings.Save();
-                refreshTimer.Interval = Math.Max(30, settings.RefreshSeconds) * 1000;
                 usagePopup.ApplySettings(settings);
                 ResetThresholdNotificationState();
                 if (lastSnapshot != null)
