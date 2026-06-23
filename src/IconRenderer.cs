@@ -135,8 +135,8 @@ namespace CodexUsageTray
             string[] candidates = text == "!"
                 ? new string[] { "Segoe UI", "Microsoft Sans Serif" }
                 : text.Length >= 3
-                    ? new string[] { "Arial Narrow", "Segoe UI", "Microsoft Sans Serif" }
-                    : new string[] { "Segoe UI", "Microsoft Sans Serif" };
+                    ? new string[] { "Segoe UI Semibold", "Arial Narrow", "Segoe UI", "Microsoft Sans Serif" }
+                    : new string[] { "Segoe UI Semibold", "Segoe UI", "Microsoft Sans Serif" };
             for (int i = 0; i < candidates.Length; i++)
             {
                 try
@@ -195,7 +195,7 @@ namespace CodexUsageTray
                 using (Matrix squeeze = new Matrix())
                 {
                     squeeze.Translate(centerX, centerY);
-                    squeeze.Scale(0.84f, 0.84f);
+                    squeeze.Scale(0.92f, 0.92f);
                     squeeze.Translate(-centerX, -centerY);
                     path.Transform(squeeze);
                 }
@@ -228,7 +228,7 @@ namespace CodexUsageTray
                     ? new RectangleF(1, 1, size - 2, size - 2)
                     : new RectangleF(1, 1, size - 2, size - 2);
 
-                using (FontFamily family = new FontFamily("Segoe UI"))
+                using (FontFamily family = CreateTrayIconFontFamily(text))
                 using (GraphicsPath textPath = CreateCenteredTextPath(text, family, bounds, size))
                 {
                     float shadowOffset = size == 64 ? 1.2f : 0.6f;
