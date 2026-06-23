@@ -1,5 +1,6 @@
 # Local build output
 *.exe
 
-# Local PowerShell scripts
+# Local build scripts
 *.ps1
+*.bat
