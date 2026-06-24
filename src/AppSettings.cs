@@ -16,7 +16,9 @@ namespace CodexUsageTray
 {
     internal sealed class AppSettings
     {
-        public const int CurrentSettingsVersion = 4;
+        public const int CurrentSettingsVersion = 5;
+        public const string DefaultTrayBoxColor = "#0078D7";
+        public const string DefaultTrayTextColor = "#FFFFFF";
         public const string IconMetricWeekly = "Weekly";
         public const string IconMetricFiveHour = "FiveHour";
         public const string ThemeSystem = "System Default";
@@ -35,6 +37,10 @@ namespace CodexUsageTray
         public bool ThresholdNotifications { get; set; }
         public int RefreshSeconds { get; set; }
         public int IdleRefreshSeconds { get; set; }
+        public bool ShowTrayBox { get; set; }
+        public bool UseCustomTrayBoxColor { get; set; }
+        public string TrayBoxColor { get; set; }
+        public string TrayTextColor { get; set; }
         public string Theme { get; set; }
 
         public AppSettings()
@@ -51,6 +57,10 @@ namespace CodexUsageTray
             ThresholdNotifications = false;
             RefreshSeconds = 300;
             IdleRefreshSeconds = 0;
+            ShowTrayBox = true;
+            UseCustomTrayBoxColor = false;
+            TrayBoxColor = DefaultTrayBoxColor;
+            TrayTextColor = DefaultTrayTextColor;
             Theme = ThemeSystem;
         }
 
@@ -130,6 +140,14 @@ namespace CodexUsageTray
             {
                 IdleRefreshSeconds = RefreshSeconds;
             }
+            if (string.IsNullOrWhiteSpace(TrayBoxColor) || !IsColorValue(TrayBoxColor))
+            {
+                TrayBoxColor = DefaultTrayBoxColor;
+            }
+            if (string.IsNullOrWhiteSpace(TrayTextColor) || !IsColorValue(TrayTextColor))
+            {
+                TrayTextColor = DefaultTrayTextColor;
+            }
             if (string.IsNullOrEmpty(Theme))
             {
                 Theme = ThemeSystem;
@@ -160,6 +178,46 @@ namespace CodexUsageTray
             }
 
             return IsWindowsAppDarkMode();
+        }
+
+        public Color GetTrayBoxColor()
+        {
+            return ParseColor(TrayBoxColor, Color.FromArgb(0, 120, 215));
+        }
+
+        public Color GetTrayTextColor()
+        {
+            return ParseColor(TrayTextColor, Color.White);
+        }
+
+        public static string FormatColor(Color color)
+        {
+            return "#" + color.R.ToString("X2") + color.G.ToString("X2") + color.B.ToString("X2");
+        }
+
+        private static bool IsColorValue(string value)
+        {
+            try
+            {
+                ColorTranslator.FromHtml(value);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Color ParseColor(string value, Color fallback)
+        {
+            try
+            {
+                return ColorTranslator.FromHtml(value);
+            }
+            catch
+            {
+                return fallback;
+            }
         }
 
         private static bool IsWindowsAppDarkMode()

@@ -21,17 +21,21 @@ namespace CodexUsageTray
 
         public static Icon CreatePercentIcon(int percent, AppSettings settings)
         {
-            return CreateTextIcon(percent.ToString(), ColorForPercent(percent, settings), Color.White);
+            return CreateTextIcon(
+                percent.ToString(),
+                BoxColorForPercent(percent, settings),
+                TextColor(settings),
+                settings == null || settings.ShowTrayBox);
         }
 
         public static Icon CreateUnknownIcon(string text)
         {
-            return CreateTextIcon(text, Color.FromArgb(64, 64, 64), Color.White);
+            return CreateTextIcon(text, Color.FromArgb(64, 64, 64), Color.White, true);
         }
 
         public static Icon CreateErrorIcon()
         {
-            return CreateTextIcon("!", Color.FromArgb(210, 46, 46), Color.White);
+            return CreateTextIcon("!", Color.FromArgb(210, 46, 46), Color.White, true);
         }
 
         public static Color ColorForPercent(int percent, AppSettings settings)
@@ -52,10 +56,27 @@ namespace CodexUsageTray
 
         public static Bitmap CreatePreviewBitmap(int percent, AppSettings settings)
         {
-            return CreateTextBitmap(percent.ToString(), ColorForPercent(percent, settings), Color.White, 18);
+            return CreateTextBitmap(
+                percent.ToString(),
+                BoxColorForPercent(percent, settings),
+                TextColor(settings),
+                18,
+                settings == null || settings.ShowTrayBox);
         }
 
-        private static Icon CreateTextIcon(string text, Color background, Color foreground)
+        private static Color BoxColorForPercent(int percent, AppSettings settings)
+        {
+            return settings != null && settings.UseCustomTrayBoxColor
+                ? settings.GetTrayBoxColor()
+                : ColorForPercent(percent, settings);
+        }
+
+        private static Color TextColor(AppSettings settings)
+        {
+            return settings != null ? settings.GetTrayTextColor() : Color.White;
+        }
+
+        private static Icon CreateTextIcon(string text, Color background, Color foreground, bool showBackground)
         {
             const int iconWidth = 32;
             const int iconHeight = 32;
@@ -68,7 +89,10 @@ namespace CodexUsageTray
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 g.Clear(Color.Transparent);
-                g.FillRectangle(backgroundBrush, -2, -2, iconWidth + 4, iconHeight + 4);
+                if (showBackground)
+                {
+                    g.FillRectangle(backgroundBrush, -2, -2, iconWidth + 4, iconHeight + 4);
+                }
 
                 if (!string.IsNullOrEmpty(text))
                 {
@@ -204,7 +228,7 @@ namespace CodexUsageTray
             return path;
         }
 
-        private static Bitmap CreateTextBitmap(string text, Color background, Color foreground, int size)
+        private static Bitmap CreateTextBitmap(string text, Color background, Color foreground, int size, bool showBackground)
         {
             Bitmap bitmap = new Bitmap(size, size);
             using (Graphics g = Graphics.FromImage(bitmap))
@@ -217,7 +241,10 @@ namespace CodexUsageTray
                 g.CompositingQuality = CompositingQuality.HighQuality;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
-                g.FillRectangle(backgroundBrush, 0, 0, size, size);
+                if (showBackground)
+                {
+                    g.FillRectangle(backgroundBrush, 0, 0, size, size);
+                }
 
                 if (string.IsNullOrEmpty(text))
                 {
