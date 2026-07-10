@@ -1,0 +1,153 @@
+name: Verify Windows Build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Compile executable
+        shell: pwsh
+        run: |
+          $source = "CodexUsageTray.cs"
+          $sourceDir = "src"
+          $icon = "icon.ico"
+          $exe = "CodexUsageTray.exe"
+
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Entrypoint source file not found: $source"
+          }
+          if (-not (Test-Path -LiteralPath $sourceDir)) {
+            throw "Source folder not found: $sourceDir"
+          }
+          if (-not (Test-Path -LiteralPath $icon)) {
+            throw "Icon file not found: $icon"
+          }
+
+          $sourceFiles = Get-ChildItem -LiteralPath $sourceDir -Filter "*.cs" |
+            Sort-Object Name |
+            Select-Object -ExpandProperty FullName
+          if (-not $sourceFiles) {
+            throw "No source files found in $sourceDir"
+          }
+
+          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
+          $candidates = @(
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+          )
+          $compiler = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            throw "Could not find .NET Framework csc.exe."
+          }
+
+          $compilerArgs = @(
+            "/nologo",
+            "/langversion:5",
+            "/warnaserror+",
+            "/target:winexe",
+            "/optimize+",
+            "/platform:anycpu",
+            "/win32icon:$icon",
+            "/out:$exe",
+            "/reference:System.dll",
+            "/reference:System.Core.dll",
+            "/reference:System.Drawing.dll",
+            "/reference:System.Windows.Forms.dll",
+            "/reference:System.Web.Extensions.dll",
+            $source
+          ) + $sourceFiles
+
+          & $compiler $compilerArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build failed with exit code $LASTEXITCODE."
+          }
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Build completed without creating $exe"
+          }
+          if ((Get-Item -LiteralPath $exe).Length -le 0) {
+            throw "Build created an empty executable."
+          }
+
+      - name: Validate updater script syntax
+        shell: powershell
+        run: |
+          $tempDir = Join-Path $env:RUNNER_TEMP ("codex-updater-parse-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $tempDir | Out-Null
+          try {
+            $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path "CodexUsageTray.exe").Path)
+            $type = $assembly.GetType("CodexUsageTray.UpdateService", $true)
+            $method = $type.GetMethod(
+              "WriteUpdaterScript",
+              [Reflection.BindingFlags]"Static,NonPublic")
+            $script = [string](Join-Path $tempDir "update.ps1")
+            $staged = [string](Join-Path $tempDir "staged.exe")
+            $target = [string](Join-Path $tempDir "target.exe")
+            $backup = [string](Join-Path $tempDir "target.exe.bak")
+            $method.Invoke(
+              $null,
+              [object[]]@($script, $staged, $target, $backup, [int]12345))
+
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $script,
+              [ref]$tokens,
+              [ref]$errors)
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw "Generated updater script has PowerShell syntax errors."
+            }
+          } finally {
+            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Run usage parser tests
+        shell: pwsh
+        run: |
+          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
+          $compiler = @(
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            throw "Could not find .NET Framework csc.exe."
+          }
+
+          $testExe = "CodexUsageTray.Tests.exe"
+          & $compiler `
+            /nologo `
+            /langversion:5 `
+            /target:exe `
+            /optimize+ `
+            "/out:$testExe" `
+            /reference:System.dll `
+            /reference:System.Core.dll `
+            /reference:System.Web.Extensions.dll `
+            tests\CodexUsageTray.Tests.cs `
+            src\CodexRateLimitClient.cs `
+            src\RateLimitResetCredit.cs `
+            src\UsageSnapshot.cs `
+            src\UsageLimitSet.cs `
+            src\LimitWindow.cs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Test compilation failed with exit code $LASTEXITCODE."
+          }
+
+          & ".\$testExe" "tests\fixtures\rate-limits.json"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tests failed with exit code $LASTEXITCODE."
+          }

@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   build-release:
     runs-on: windows-latest
@@ -19,34 +23,80 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify current main head
+        shell: pwsh
+        run: |
+          git fetch origin main --no-tags
+          $mainSha = [string](git rev-parse origin/main)
+          if (-not [string]::Equals($mainSha.Trim(), $env:GITHUB_SHA, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Release SHA $env:GITHUB_SHA is not the current main head $($mainSha.Trim())."
+          }
+
+      - name: Check for an existing release at this commit
+        id: release_guard
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          $existingTag = ""
+          $tags = @(git tag --list | Where-Object { $_ -match '^v?\d+\.\d+\.\d+$' })
+          foreach ($tag in $tags) {
+            $tagSha = [string](git rev-list -n 1 $tag)
+            if (-not [string]::Equals($tagSha.Trim(), $env:RELEASE_SHA, [System.StringComparison]::OrdinalIgnoreCase)) {
+              continue
+            }
+
+            gh release view $tag --json tagName *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $existingTag = $tag
+              break
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($existingTag)) {
+            "skip=false" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Release $existingTag already targets $env:RELEASE_SHA; skipping duplicate publication."
+            "skip=true" >> $env:GITHUB_OUTPUT
+            "existing_tag=$existingTag" >> $env:GITHUB_OUTPUT
+          }
+
       - name: Determine next patch version
+        if: steps.release_guard.outputs.skip != 'true'
         id: version
         shell: pwsh
         run: |
           $tags = @(
-            git tag --list "0.1.*" | ForEach-Object {
+            git tag --list | ForEach-Object {
               $tag = [string]$_
-              if ($tag -match '^0\.1\.(\d+)$') {
+              if ($tag -match '^v?(\d+)\.(\d+)\.(\d+)$') {
                 [pscustomobject]@{
                   Name = $tag
-                  Patch = [int]$Matches[1]
+                  Version = [version]::new(
+                    [int]$Matches[1],
+                    [int]$Matches[2],
+                    [int]$Matches[3])
                 }
               }
-            } | Sort-Object -Property Patch -Descending
+            } | Sort-Object -Property Version -Descending
           )
           if ($tags.Count -eq 0) {
             $next = "0.1.0"
             $previousTag = ""
           } else {
             $latest = $tags[0]
-            $patch = $latest.Patch + 1
-            $next = "0.1.$patch"
+            $next = [version]::new(
+              $latest.Version.Major,
+              $latest.Version.Minor,
+              $latest.Version.Build + 1).ToString(3)
             $previousTag = $latest.Name
           }
           "version=$next" >> $env:GITHUB_OUTPUT
           "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
 
       - name: Bake release version
+        if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
@@ -69,6 +119,7 @@ jobs:
           Set-Content -Path "src\BuildVersion.cs" -Value $source -Encoding UTF8
 
       - name: Build executable
+        if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
         run: |
           $source = "CodexUsageTray.cs"
@@ -93,9 +144,10 @@ jobs:
             throw "No source files found in $sourceDir"
           }
 
+          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
           $candidates = @(
-            (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
-            (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
           )
           $compiler = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
           if (-not $compiler) {
@@ -104,6 +156,8 @@ jobs:
 
           $compilerArgs = @(
             "/nologo",
+            "/langversion:5",
+            "/warnaserror+",
             "/target:winexe",
             "/optimize+",
             "/platform:anycpu",
@@ -125,7 +179,80 @@ jobs:
             throw "Build completed without creating $exe"
           }
 
+      - name: Validate updater script syntax
+        if: steps.release_guard.outputs.skip != 'true'
+        shell: powershell
+        run: |
+          $tempDir = Join-Path $env:RUNNER_TEMP ("codex-updater-parse-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $tempDir | Out-Null
+          try {
+            $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path "CodexUsageTray.exe").Path)
+            $type = $assembly.GetType("CodexUsageTray.UpdateService", $true)
+            $method = $type.GetMethod(
+              "WriteUpdaterScript",
+              [Reflection.BindingFlags]"Static,NonPublic")
+            $script = [string](Join-Path $tempDir "update.ps1")
+            $staged = [string](Join-Path $tempDir "staged.exe")
+            $target = [string](Join-Path $tempDir "target.exe")
+            $backup = [string](Join-Path $tempDir "target.exe.bak")
+            $method.Invoke(
+              $null,
+              [object[]]@($script, $staged, $target, $backup, [int]12345))
+
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile(
+              $script,
+              [ref]$tokens,
+              [ref]$errors)
+            if ($errors.Count -ne 0) {
+              $errors | ForEach-Object { Write-Error $_.Message }
+              throw "Generated updater script has PowerShell syntax errors."
+            }
+          } finally {
+            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Run usage parser tests
+        if: steps.release_guard.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
+          $compiler = @(
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            throw "Could not find .NET Framework csc.exe."
+          }
+
+          $testExe = "CodexUsageTray.Tests.exe"
+          & $compiler `
+            /nologo `
+            /langversion:5 `
+            /target:exe `
+            /optimize+ `
+            "/out:$testExe" `
+            /reference:System.dll `
+            /reference:System.Core.dll `
+            /reference:System.Web.Extensions.dll `
+            tests\CodexUsageTray.Tests.cs `
+            src\CodexRateLimitClient.cs `
+            src\RateLimitResetCredit.cs `
+            src\UsageSnapshot.cs `
+            src\UsageLimitSet.cs `
+            src\LimitWindow.cs
+          if ($LASTEXITCODE -ne 0) {
+            throw "Test compilation failed with exit code $LASTEXITCODE."
+          }
+
+          & ".\$testExe" "tests\fixtures\rate-limits.json"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tests failed with exit code $LASTEXITCODE."
+          }
+
       - name: Generate release notes
+        if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
@@ -149,6 +276,7 @@ jobs:
           Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
 
       - name: Create GitHub release
+        if: steps.release_guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -156,4 +284,5 @@ jobs:
             "CodexUsageTray.exe" `
             --title "${{ steps.version.outputs.version }}" `
             --notes-file "release_notes.md" `
+            --target "${{ github.sha }}" `
             --latest

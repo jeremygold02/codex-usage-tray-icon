@@ -1,0 +1,97 @@
+{
+  "id": 2,
+  "result": {
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 20,
+        "windowDurationMins": 300,
+        "resetsAt": 1783710153
+      },
+      "secondary": {
+        "usedPercent": 22,
+        "windowDurationMins": 10080,
+        "resetsAt": 1784238427
+      },
+      "credits": {
+        "hasCredits": false,
+        "unlimited": false,
+        "balance": "0"
+      },
+      "individualLimit": null,
+      "planType": "pro",
+      "rateLimitReachedType": null
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": {
+          "usedPercent": 20,
+          "windowDurationMins": 300,
+          "resetsAt": 1783710153
+        },
+        "secondary": {
+          "usedPercent": 22,
+          "windowDurationMins": 10080,
+          "resetsAt": 1784238427
+        }
+      },
+      "codex_bengalfox": {
+        "limitId": "codex_bengalfox",
+        "limitName": "GPT-5.3-Codex-Spark",
+        "primary": {
+          "usedPercent": 0,
+          "windowDurationMins": 300,
+          "resetsAt": 1783719091
+        },
+        "secondary": {
+          "usedPercent": 0,
+          "windowDurationMins": 10080,
+          "resetsAt": 1784305891
+        }
+      }
+    },
+    "rateLimitResetCredits": {
+      "availableCount": 4,
+      "credits": [
+        {
+          "id": "credit-1",
+          "resetType": "codexRateLimits",
+          "status": "available",
+          "expiresAt": 1783820680,
+          "title": "Full reset (Weekly + 5 hr)"
+        },
+        {
+          "id": "credit-2",
+          "resetType": "codexRateLimits",
+          "status": "available",
+          "expiresAt": 1784334851,
+          "title": "Full reset (Weekly + 5 hr)"
+        },
+        {
+          "id": "credit-3",
+          "resetType": "codexRateLimits",
+          "status": "available",
+          "expiresAt": 1785109634,
+          "title": "Full reset (Weekly + 5 hr)"
+        },
+        {
+          "id": "credit-4",
+          "resetType": "codexRateLimits",
+          "status": "available",
+          "expiresAt": 1785528002,
+          "title": "Full reset (Weekly + 5 hr)"
+        },
+        {
+          "id": "used-credit",
+          "resetType": "codexRateLimits",
+          "status": "used",
+          "expiresAt": 1786000000,
+          "title": "Used reset"
+        }
+      ]
+    }
+  }
+}
