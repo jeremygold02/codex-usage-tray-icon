@@ -7,14 +7,36 @@ namespace CodexUsageTray
     {
         public static bool IsCodexRunning()
         {
-            Process[] processes = Process.GetProcesses();
+            int currentProcessId;
+            try
+            {
+                using (Process currentProcess = Process.GetCurrentProcess())
+                {
+                    currentProcessId = currentProcess.Id;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+            Process[] processes;
+            try
+            {
+                processes = Process.GetProcesses();
+            }
+            catch
+            {
+                return false;
+            }
+
             try
             {
                 foreach (Process process in processes)
                 {
                     try
                     {
-                        if (IsCodexProcessName(process.ProcessName))
+                        if (process.Id != currentProcessId && IsCodexProcessName(process.ProcessName))
                         {
                             return true;
                         }
@@ -28,7 +50,13 @@ namespace CodexUsageTray
             {
                 foreach (Process process in processes)
                 {
-                    process.Dispose();
+                    try
+                    {
+                        process.Dispose();
+                    }
+                    catch
+                    {
+                    }
                 }
             }
 

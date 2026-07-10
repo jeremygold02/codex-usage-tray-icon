@@ -18,41 +18,60 @@ namespace CodexUsageTray
     internal sealed class TrayAppContext : ApplicationContext
     {
         private const int ActivityPollSeconds = 30;
+        private const int ShowWindowRestore = 9;
+        private const string RefreshingStatus = "Refreshing usage...";
+        private const string RefreshFailedStatus = "Refresh failed; showing last known usage.";
+        private const string RefreshFailedWithoutDataStatus = "Unable to refresh usage. Try again.";
+        private const string PausedStatus = "Automatic refresh paused while Codex is not running.";
+        private const string PausedAfterFailureStatus = "Automatic refresh paused; last refresh failed.";
+        private const string WaitingStatus = "Waiting for Codex to start...";
 
         private readonly NotifyIcon notifyIcon;
         private readonly System.Windows.Forms.Timer refreshTimer;
+        private readonly System.Windows.Forms.Timer activityTimer;
         private readonly Control dispatcher;
         private readonly AppSettings settings;
-        private readonly UsagePopup usagePopup;
+        private readonly Stopwatch refreshClock;
+        private readonly CancellationTokenSource shutdownCancellation;
         private readonly bool showUsageOnStart;
         private readonly bool showSettingsOnStart;
 
+        private UsagePopup usagePopup;
         private Icon currentIcon;
-        private UsageSnapshot lastSnapshot;
+        private UsageSnapshot lastSuccessfulSnapshot;
+        private UsageSnapshot currentSnapshot;
         private int? lastWeeklyThresholdLevel;
         private int? lastFiveHourThresholdLevel;
-        private DateTime lastRefreshStartedAt = DateTime.MinValue;
+        private long lastRefreshStartedMilliseconds = -1;
+        private DateTime lastAttemptedAt = DateTime.MinValue;
+        private bool codexRunning;
         private bool refreshInProgress;
+        private bool refreshFeedbackRequested;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
+        private volatile bool shuttingDown;
         private string updateStatusText = "";
         private SettingsForm settingsForm;
         private System.Windows.Forms.Timer startupUiTimer;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(IntPtr windowHandle, int command);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr windowHandle);
 
         public TrayAppContext(string[] args)
         {
             showUsageOnStart = HasArg(args, "--show-usage");
             showSettingsOnStart = HasArg(args, "--show-settings");
+            refreshClock = Stopwatch.StartNew();
+            shutdownCancellation = new CancellationTokenSource();
             dispatcher = new Control();
             dispatcher.CreateControl();
             settings = AppSettings.Load();
-            usagePopup = new UsagePopup(settings);
-            usagePopup.RefreshRequested += delegate { RefreshUsage(false); };
-            usagePopup.SettingsRequested += delegate
-            {
-                usagePopup.Hide();
-                ShowSettings();
-            };
+            usagePopup = CreateUsagePopup();
 
             notifyIcon = new NotifyIcon();
             SetNotifyTooltip("Codex Usage: starting");
@@ -62,9 +81,17 @@ namespace CodexUsageTray
             notifyIcon.Visible = true;
 
             refreshTimer = new System.Windows.Forms.Timer();
-            refreshTimer.Interval = ActivityPollSeconds * 1000;
-            refreshTimer.Tick += delegate { RefreshUsageIfDue(false); };
-            refreshTimer.Start();
+            refreshTimer.Tick += delegate
+            {
+                refreshTimer.Stop();
+                RefreshUsageIfDue(false);
+            };
+
+            codexRunning = CodexActivityMonitor.IsCodexRunning();
+            activityTimer = new System.Windows.Forms.Timer();
+            activityTimer.Interval = ActivityPollSeconds * 1000;
+            activityTimer.Tick += delegate { PollCodexActivity(); };
+            activityTimer.Start();
 
             RefreshUsageIfDue(false);
             CheckForUpdates(false);
@@ -108,6 +135,22 @@ namespace CodexUsageTray
             return false;
         }
 
+        public void RequestExit()
+        {
+            if (shuttingDown)
+            {
+                return;
+            }
+
+            TryPostToUi(delegate
+            {
+                if (!shuttingDown)
+                {
+                    ExitThread();
+                }
+            });
+        }
+
         private ContextMenuStrip BuildContextMenu()
         {
             ContextMenuStrip menu = new ContextMenuStrip();
@@ -143,103 +186,384 @@ namespace CodexUsageTray
 
         private void RefreshUsage(bool showBalloon)
         {
+            if (shuttingDown)
+            {
+                return;
+            }
+
+            refreshFeedbackRequested = refreshFeedbackRequested || showBalloon;
+            if (refreshInProgress)
+            {
+                SetUsagePopupRefreshing(true);
+                return;
+            }
+
+            refreshInProgress = true;
+            lastAttemptedAt = DateTime.Now;
+            lastRefreshStartedMilliseconds = refreshClock.ElapsedMilliseconds;
+            refreshTimer.Stop();
+            ApplyRefreshingState();
+
+            CancellationToken cancellationToken = shutdownCancellation.Token;
+            Task.Factory.StartNew(
+                delegate
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return CodexRateLimitClient.FetchUsage();
+                },
+                cancellationToken,
+                TaskCreationOptions.None,
+                TaskScheduler.Default).ContinueWith(delegate(Task<UsageSnapshot> task)
+            {
+                if (task.IsFaulted)
+                {
+                    AggregateException ignored = task.Exception;
+                }
+
+                TryPostToUi(delegate
+                {
+                    if (shuttingDown)
+                    {
+                        return;
+                    }
+                    CompleteRefresh(task);
+                });
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        }
+
+        private void RefreshUsageIfDue(bool showBalloon)
+        {
+            if (shuttingDown)
+            {
+                return;
+            }
+
+            codexRunning = CodexActivityMonitor.IsCodexRunning();
+            int refreshSeconds = GetCurrentRefreshSeconds();
+            if (refreshSeconds <= 0)
+            {
+                ApplyPausedState();
+                return;
+            }
+
+            RestoreActiveState();
             if (refreshInProgress)
             {
                 return;
             }
 
-            refreshInProgress = true;
-            lastRefreshStartedAt = DateTime.Now;
-            SetNotifyTooltip("Codex Usage: refreshing");
-
-            Task.Factory.StartNew(
-                delegate { return CodexRateLimitClient.FetchUsage(); },
-                CancellationToken.None,
-                TaskCreationOptions.None,
-                TaskScheduler.Default).ContinueWith(delegate(Task<UsageSnapshot> task)
+            if (lastRefreshStartedMilliseconds < 0)
             {
-                if (!dispatcher.IsDisposed && dispatcher.IsHandleCreated)
-                {
-                    dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        refreshInProgress = false;
-                        if (task.IsFaulted)
-                        {
-                            string message = task.Exception != null && task.Exception.GetBaseException() != null
-                                ? task.Exception.GetBaseException().Message
-                                : "Unknown error";
-                            ApplySnapshot(UsageSnapshot.FromError(message), showBalloon);
-                        }
-                        else
-                        {
-                            ApplySnapshot(task.Result, showBalloon);
-                        }
-                    }));
-                }
-            });
-        }
-
-        private void RefreshUsageIfDue(bool showBalloon)
-        {
-            int refreshSeconds = GetCurrentRefreshSeconds();
-            if (refreshSeconds <= 0)
-            {
-                ApplyWaitingForCodexState();
+                RefreshUsage(showBalloon);
                 return;
             }
 
-            if (lastRefreshStartedAt != DateTime.MinValue &&
-                (DateTime.Now - lastRefreshStartedAt).TotalSeconds < refreshSeconds)
+            long intervalMilliseconds = (long)refreshSeconds * 1000L;
+            long elapsedMilliseconds = refreshClock.ElapsedMilliseconds - lastRefreshStartedMilliseconds;
+            long remainingMilliseconds = intervalMilliseconds - elapsedMilliseconds;
+            if (remainingMilliseconds <= 0)
             {
+                RefreshUsage(showBalloon);
                 return;
             }
 
-            RefreshUsage(showBalloon);
+            ArmRefreshTimer(remainingMilliseconds);
         }
 
         private int GetCurrentRefreshSeconds()
         {
-            if (CodexActivityMonitor.IsCodexRunning())
+            if (codexRunning)
             {
                 return Math.Max(30, settings.RefreshSeconds);
             }
 
-            return settings.IdleRefreshSeconds <= 0 ? 0 : Math.Max(60, settings.IdleRefreshSeconds);
+            return Math.Max(0, settings.IdleRefreshSeconds);
         }
 
-        private void ApplyWaitingForCodexState()
+        private void ArmRefreshTimer(long delayMilliseconds)
         {
-            if (lastSnapshot != null || refreshInProgress)
+            if (shuttingDown || refreshInProgress)
             {
                 return;
             }
 
-            SetNotifyTooltip("Codex Usage: waiting for Codex");
-            usagePopup.UpdateSnapshot(UsageSnapshot.FromError("Waiting for Codex to start..."));
+            long boundedDelay = Math.Max(1L, Math.Min((long)int.MaxValue, delayMilliseconds));
+            refreshTimer.Stop();
+            refreshTimer.Interval = (int)boundedDelay;
+            refreshTimer.Start();
         }
 
-        private void ApplySnapshot(UsageSnapshot snapshot, bool showBalloon)
+        private void PollCodexActivity()
         {
-            lastSnapshot = snapshot;
-
-            if (!string.IsNullOrEmpty(snapshot.ErrorMessage))
+            if (shuttingDown)
             {
+                return;
+            }
+
+            bool isRunning = CodexActivityMonitor.IsCodexRunning();
+            if (isRunning == codexRunning)
+            {
+                return;
+            }
+
+            codexRunning = isRunning;
+            RefreshScheduleChanged();
+        }
+
+        private void RefreshScheduleChanged()
+        {
+            refreshTimer.Stop();
+            if (GetCurrentRefreshSeconds() <= 0)
+            {
+                ApplyPausedState();
+                return;
+            }
+
+            RestoreActiveState();
+            RefreshUsageIfDue(false);
+        }
+
+        private void CompleteRefresh(Task<UsageSnapshot> task)
+        {
+            refreshInProgress = false;
+            bool showFeedback = refreshFeedbackRequested;
+            refreshFeedbackRequested = false;
+            SetUsagePopupRefreshing(false);
+
+            UsageSnapshot failedSnapshot = !task.IsCanceled && !task.IsFaulted
+                ? task.Result
+                : null;
+            if (failedSnapshot == null || !string.IsNullOrEmpty(failedSnapshot.ErrorMessage))
+            {
+                ApplyRefreshFailure(failedSnapshot, showFeedback);
+            }
+            else
+            {
+                ApplySuccessfulSnapshot(task.Result, showFeedback);
+            }
+
+            RefreshUsageIfDue(false);
+        }
+
+        private void ApplyRefreshingState()
+        {
+            UsageSnapshot refreshingSnapshot;
+            if (lastSuccessfulSnapshot != null)
+            {
+                refreshingSnapshot = lastSuccessfulSnapshot.Clone();
+            }
+            else
+            {
+                refreshingSnapshot = UsageSnapshot.FromError(RefreshingStatus);
+                refreshingSnapshot.LastUpdated = DateTime.MinValue;
+            }
+
+            refreshingSnapshot.LastAttempted = lastAttemptedAt;
+            refreshingSnapshot.StatusMessage = RefreshingStatus;
+            refreshingSnapshot.IsStale = false;
+            refreshingSnapshot.IsRefreshing = true;
+            refreshingSnapshot.IsPaused = false;
+            currentSnapshot = refreshingSnapshot;
+
+            if (lastSuccessfulSnapshot != null)
+            {
+                SetNotifyTooltip(BuildNativeTooltipWithStatus(refreshingSnapshot));
+            }
+            else
+            {
+                SetNotifyTooltip("Codex Usage: refreshing");
+            }
+            UpdateUsagePopup(refreshingSnapshot);
+            SetUsagePopupRefreshing(true);
+        }
+
+        private void ApplySuccessfulSnapshot(UsageSnapshot snapshot, bool showBalloon)
+        {
+            if (snapshot.LastUpdated == DateTime.MinValue)
+            {
+                snapshot.LastUpdated = DateTime.Now;
+            }
+            snapshot.LastAttempted = lastAttemptedAt;
+            snapshot.StatusMessage = "";
+            snapshot.IsStale = false;
+            snapshot.IsRefreshing = false;
+            snapshot.IsPaused = false;
+
+            lastSuccessfulSnapshot = snapshot.Clone();
+            currentSnapshot = snapshot.Clone();
+            RenderDataSnapshot(currentSnapshot, true, true, showBalloon);
+        }
+
+        private void ApplyRefreshFailure(UsageSnapshot failure, bool showBalloon)
+        {
+            string failureMessage = failure != null && !string.IsNullOrWhiteSpace(failure.ErrorMessage)
+                ? failure.ErrorMessage
+                : RefreshFailedWithoutDataStatus;
+            if (lastSuccessfulSnapshot != null)
+            {
+                UsageSnapshot staleSnapshot = lastSuccessfulSnapshot.Clone();
+                staleSnapshot.LastAttempted = lastAttemptedAt;
+                staleSnapshot.ErrorMessage = failureMessage;
+                staleSnapshot.StatusMessage = failureMessage;
+                staleSnapshot.IsStale = true;
+                staleSnapshot.IsRefreshing = false;
+                staleSnapshot.IsPaused = false;
+                currentSnapshot = staleSnapshot;
+
+                SetNotifyTooltip(BuildNativeTooltipWithStatus(staleSnapshot));
+                UpdateUsagePopup(staleSnapshot);
+            }
+            else
+            {
+                UsageSnapshot failedSnapshot = failure != null
+                    ? failure.Clone()
+                    : UsageSnapshot.FromError(failureMessage);
+                failedSnapshot.LastUpdated = DateTime.MinValue;
+                failedSnapshot.LastAttempted = lastAttemptedAt;
+                failedSnapshot.ErrorMessage = failureMessage;
+                failedSnapshot.StatusMessage = failureMessage;
+                failedSnapshot.IsStale = true;
+                failedSnapshot.IsRefreshing = false;
+                failedSnapshot.IsPaused = false;
+                currentSnapshot = failedSnapshot;
+
                 SetTrayIcon(IconRenderer.CreateErrorIcon());
-                SetNotifyTooltip("Codex Usage: " + snapshot.ErrorMessage);
-                if (showBalloon)
-                {
-                    notifyIcon.ShowBalloonTip(3000, "Codex Usage", snapshot.ErrorMessage, ToolTipIcon.Warning);
-                }
+                SetNotifyTooltip("Codex Usage: " + failureMessage);
+                UpdateUsagePopup(failedSnapshot);
+            }
+
+            if (showBalloon)
+            {
+                notifyIcon.ShowBalloonTip(3000, "Codex Usage", failureMessage, ToolTipIcon.Warning);
+            }
+        }
+
+        private static string BuildPausedFailureStatus(string failureMessage)
+        {
+            if (string.IsNullOrWhiteSpace(failureMessage))
+            {
+                return PausedAfterFailureStatus;
+            }
+
+            return "Checks paused - " + failureMessage;
+        }
+
+        private static string GetFailureStatus(UsageSnapshot snapshot, string fallback)
+        {
+            return snapshot != null && !string.IsNullOrWhiteSpace(snapshot.ErrorMessage)
+                ? snapshot.ErrorMessage
+                : fallback;
+        }
+
+        private void ApplyPausedState()
+        {
+            refreshTimer.Stop();
+            bool failedLastAttempt = currentSnapshot != null && currentSnapshot.IsStale;
+            string failureMessage = failedLastAttempt && currentSnapshot != null
+                ? currentSnapshot.ErrorMessage
+                : null;
+
+            if (lastSuccessfulSnapshot != null)
+            {
+                UsageSnapshot pausedSnapshot = lastSuccessfulSnapshot.Clone();
+                pausedSnapshot.LastAttempted = lastAttemptedAt;
+                pausedSnapshot.ErrorMessage = failureMessage;
+                pausedSnapshot.StatusMessage = failedLastAttempt
+                    ? BuildPausedFailureStatus(failureMessage)
+                    : PausedStatus;
+                pausedSnapshot.IsStale = failedLastAttempt;
+                pausedSnapshot.IsRefreshing = refreshInProgress;
+                pausedSnapshot.IsPaused = true;
+                currentSnapshot = pausedSnapshot;
+
+                SetNotifyTooltip(BuildNativeTooltipWithStatus(pausedSnapshot));
+                UpdateUsagePopup(pausedSnapshot);
+            }
+            else
+            {
+                UsageSnapshot waitingSnapshot = failedLastAttempt
+                    ? currentSnapshot.Clone()
+                    : UsageSnapshot.FromError(WaitingStatus);
+                waitingSnapshot.LastUpdated = DateTime.MinValue;
+                waitingSnapshot.LastAttempted = lastAttemptedAt;
+                waitingSnapshot.ErrorMessage = failureMessage;
+                waitingSnapshot.StatusMessage = failedLastAttempt
+                    ? BuildPausedFailureStatus(failureMessage)
+                    : WaitingStatus;
+                waitingSnapshot.IsStale = failedLastAttempt;
+                waitingSnapshot.IsRefreshing = refreshInProgress;
+                waitingSnapshot.IsPaused = true;
+                currentSnapshot = waitingSnapshot;
+
+                SetTrayIcon(IconRenderer.CreateUnknownIcon("..."));
+                SetNotifyTooltip("Codex Usage: waiting for Codex");
+                UpdateUsagePopup(waitingSnapshot);
+            }
+            SetUsagePopupRefreshing(refreshInProgress);
+        }
+
+        private void RestoreActiveState()
+        {
+            if (currentSnapshot == null || !currentSnapshot.IsPaused)
+            {
                 return;
             }
 
-            LimitWindow weekly = snapshot.Weekly;
+            if (lastSuccessfulSnapshot != null)
+            {
+                UsageSnapshot activeSnapshot = currentSnapshot.IsStale
+                    ? currentSnapshot.Clone()
+                    : lastSuccessfulSnapshot.Clone();
+                activeSnapshot.IsPaused = false;
+                activeSnapshot.IsRefreshing = refreshInProgress;
+                activeSnapshot.StatusMessage = refreshInProgress
+                    ? RefreshingStatus
+                    : (activeSnapshot.IsStale
+                        ? GetFailureStatus(activeSnapshot, RefreshFailedStatus)
+                        : "");
+                currentSnapshot = activeSnapshot;
+                RenderDataSnapshot(currentSnapshot, false, false, false);
+            }
+            else
+            {
+                UsageSnapshot activeSnapshot = currentSnapshot.Clone();
+                activeSnapshot.IsPaused = false;
+                activeSnapshot.IsRefreshing = refreshInProgress;
+                activeSnapshot.StatusMessage = refreshInProgress
+                    ? RefreshingStatus
+                    : (activeSnapshot.IsStale
+                        ? GetFailureStatus(activeSnapshot, RefreshFailedWithoutDataStatus)
+                        : "Checking limits...");
+                currentSnapshot = activeSnapshot;
+                UpdateUsagePopup(currentSnapshot);
+                SetUsagePopupRefreshing(refreshInProgress);
+            }
+        }
+
+        private void RenderDataSnapshot(UsageSnapshot snapshot, bool renderIcon, bool updateThresholds, bool showBalloon)
+        {
+            if (snapshot == null)
+            {
+                return;
+            }
+
             LimitWindow iconWindow = GetIconWindow(snapshot);
-            int remaining = iconWindow != null ? ClampPercent(100.0 - iconWindow.UsedPercent) : 0;
-            SetTrayIcon(IconRenderer.CreatePercentIcon(remaining, settings));
-            SetNotifyTooltip(BuildNativeTooltip(snapshot));
-            usagePopup.UpdateSnapshot(snapshot);
-            bool thresholdBalloonShown = UpdateThresholdNotifications(snapshot);
+            if (renderIcon)
+            {
+                if (iconWindow == null)
+                {
+                    SetTrayIcon(IconRenderer.CreateUnknownIcon("..."));
+                }
+                else
+                {
+                    int remaining = ClampPercent(100.0 - iconWindow.UsedPercent);
+                    SetTrayIcon(IconRenderer.CreatePercentIcon(remaining, settings));
+                }
+            }
+
+            SetNotifyTooltip(BuildNativeTooltipWithStatus(snapshot));
+            UpdateUsagePopup(snapshot);
+            bool thresholdBalloonShown = updateThresholds && UpdateThresholdNotifications(snapshot);
 
             if (showBalloon && !thresholdBalloonShown)
             {
@@ -270,6 +594,16 @@ namespace CodexUsageTray
             return "Codex Usage Remaining" + Environment.NewLine +
                 "Weekly: " + FormatNativeWindow(snapshot.Weekly) + Environment.NewLine +
                 "5h: " + FormatNativeWindow(snapshot.FiveHour);
+        }
+
+        private static string BuildNativeTooltipWithStatus(UsageSnapshot snapshot)
+        {
+            string tooltip = BuildNativeTooltip(snapshot);
+            if (!string.IsNullOrWhiteSpace(snapshot.StatusMessage))
+            {
+                tooltip += Environment.NewLine + snapshot.StatusMessage;
+            }
+            return tooltip;
         }
 
         private static string FormatWindow(LimitWindow window)
@@ -313,6 +647,52 @@ namespace CodexUsageTray
         {
             notifyIcon.Text = TrimTooltip(FirstTooltipLine(value));
             NativeTrayTooltip.TrySetText(notifyIcon, value);
+        }
+
+        private void UpdateUsagePopup(UsageSnapshot snapshot)
+        {
+            UsagePopup popup = usagePopup;
+            if (popup != null && !popup.IsDisposed && !popup.Disposing)
+            {
+                popup.UpdateSnapshot(snapshot);
+            }
+        }
+
+        private void SetUsagePopupRefreshing(bool refreshing)
+        {
+            UsagePopup popup = usagePopup;
+            if (popup != null && !popup.IsDisposed && !popup.Disposing)
+            {
+                popup.SetRefreshing(refreshing);
+            }
+        }
+
+        private bool TryPostToUi(Action action)
+        {
+            if (shuttingDown || action == null || dispatcher.IsDisposed || !dispatcher.IsHandleCreated)
+            {
+                return false;
+            }
+
+            try
+            {
+                dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (!shuttingDown)
+                    {
+                        action();
+                    }
+                }));
+                return true;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
         }
 
         private static string FirstTooltipLine(string value)
@@ -437,9 +817,10 @@ namespace CodexUsageTray
 
         private void ToggleUsagePopup()
         {
-            if (usagePopup.Visible)
+            UsagePopup popup = usagePopup;
+            if (popup != null && !popup.IsDisposed && popup.Visible)
             {
-                usagePopup.Hide();
+                popup.Hide();
             }
             else
             {
@@ -449,22 +830,32 @@ namespace CodexUsageTray
 
         private void ShowUsagePopup()
         {
-            if (lastSnapshot == null)
+            UsagePopup popup = EnsureUsagePopup();
+            if (popup == null)
             {
-                usagePopup.UpdateSnapshot(UsageSnapshot.FromError("Checking limits..."));
+                return;
             }
-            else
+
+            UsageSnapshot snapshot = currentSnapshot;
+            if (snapshot == null)
             {
-                usagePopup.UpdateSnapshot(lastSnapshot);
+                snapshot = UsageSnapshot.FromError("Checking limits...");
+                snapshot.LastUpdated = DateTime.MinValue;
+                snapshot.LastAttempted = lastAttemptedAt;
+                snapshot.StatusMessage = "Checking limits...";
+                snapshot.IsRefreshing = refreshInProgress;
             }
-            usagePopup.ShowNear(Cursor.Position);
+
+            popup.UpdateSnapshot(snapshot);
+            popup.SetRefreshing(refreshInProgress);
+            popup.ShowNear(Cursor.Position);
         }
 
         private void ShowSettings()
         {
             if (settingsForm != null && !settingsForm.IsDisposed)
             {
-                settingsForm.Activate();
+                ShowAndActivateSettingsForm();
                 return;
             }
 
@@ -473,16 +864,44 @@ namespace CodexUsageTray
             settingsForm.SettingsApplied += delegate
             {
                 ApplyStartupSetting();
-                settings.Save();
-                usagePopup.ApplySettings(settings);
-                ResetThresholdNotificationState();
-                if (lastSnapshot != null)
+                UsagePopup popup = usagePopup;
+                if (popup != null && !popup.IsDisposed && !popup.Disposing)
                 {
-                    ApplySnapshot(lastSnapshot, false);
+                    popup.ApplySettings(settings);
                 }
+                ResetThresholdNotificationState();
+                if (currentSnapshot != null && lastSuccessfulSnapshot != null)
+                {
+                    RenderDataSnapshot(currentSnapshot, true, true, false);
+                }
+                RefreshScheduleChanged();
             };
             settingsForm.CheckUpdatesRequested += delegate { CheckForUpdates(true); };
             settingsForm.Show();
+            ShowAndActivateSettingsForm();
+        }
+
+        private void ShowAndActivateSettingsForm()
+        {
+            if (settingsForm == null || settingsForm.IsDisposed)
+            {
+                return;
+            }
+
+            if (!settingsForm.Visible)
+            {
+                settingsForm.Show();
+            }
+            if (settingsForm.WindowState == FormWindowState.Minimized)
+            {
+                settingsForm.WindowState = FormWindowState.Normal;
+            }
+
+            IntPtr windowHandle = settingsForm.Handle;
+            ShowWindow(windowHandle, ShowWindowRestore);
+            settingsForm.BringToFront();
+            settingsForm.Activate();
+            SetForegroundWindow(windowHandle);
         }
 
         private void ApplyStartupSetting()
@@ -494,17 +913,63 @@ namespace CodexUsageTray
             catch (Exception ex)
             {
                 settings.StartWithWindows = StartupManager.IsEnabled();
+                string message = "Could not update Windows startup setting:" +
+                    Environment.NewLine + Environment.NewLine + ex.Message;
+                try
+                {
+                    settings.Save();
+                }
+                catch (Exception saveException)
+                {
+                    message += Environment.NewLine + Environment.NewLine +
+                        "The corrected setting could not be saved: " + saveException.Message;
+                }
                 MessageBox.Show(
                     GetSettingsOwner(),
-                    "Could not update Windows startup setting:" + Environment.NewLine + Environment.NewLine + ex.Message,
+                    message,
                     "Codex Usage Settings",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
             }
         }
 
+        private UsagePopup CreateUsagePopup()
+        {
+            UsagePopup popup = new UsagePopup(settings);
+            popup.RefreshRequested += delegate { RefreshUsage(false); };
+            popup.SettingsRequested += delegate(object sender, EventArgs e)
+            {
+                UsagePopup source = sender as UsagePopup;
+                if (source != null && !source.IsDisposed)
+                {
+                    source.Hide();
+                }
+                ShowSettings();
+            };
+            return popup;
+        }
+
+        private UsagePopup EnsureUsagePopup()
+        {
+            if (shuttingDown)
+            {
+                return null;
+            }
+
+            if (usagePopup == null || usagePopup.IsDisposed)
+            {
+                usagePopup = CreateUsagePopup();
+            }
+            return usagePopup;
+        }
+
         private void CheckForUpdates(bool interactive)
         {
+            if (shuttingDown)
+            {
+                return;
+            }
+
             if (updateCheckInProgress || updateInstallInProgress)
             {
                 if (interactive)
@@ -518,29 +983,40 @@ namespace CodexUsageTray
             SetSettingsUpdateButtonState(true, "Checking...");
             SetUpdateStatusText("Checking for updates...");
 
+            CancellationToken cancellationToken = shutdownCancellation.Token;
             Task.Factory.StartNew(
-                delegate { return UpdateService.CheckForUpdate(); },
-                CancellationToken.None,
+                delegate
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return UpdateService.CheckForUpdate();
+                },
+                cancellationToken,
                 TaskCreationOptions.None,
                 TaskScheduler.Default).ContinueWith(delegate(Task<UpdateInfo> task)
             {
-                if (!dispatcher.IsDisposed && dispatcher.IsHandleCreated)
+                if (task.IsFaulted)
                 {
-                    dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        updateCheckInProgress = false;
-                        SetSettingsUpdateButtonState(false, null);
-                        if (task.IsFaulted)
-                        {
-                            HandleUpdateError(task.Exception, interactive);
-                        }
-                        else
-                        {
-                            HandleUpdateInfo(task.Result, interactive);
-                        }
-                    }));
+                    AggregateException ignored = task.Exception;
                 }
-            });
+
+                TryPostToUi(delegate
+                {
+                    updateCheckInProgress = false;
+                    SetSettingsUpdateButtonState(false, null);
+                    if (task.IsCanceled)
+                    {
+                        SetUpdateStatusText("Update check canceled.");
+                    }
+                    else if (task.IsFaulted)
+                    {
+                        HandleUpdateError(task.Exception, interactive);
+                    }
+                    else
+                    {
+                        HandleUpdateInfo(task.Result, interactive);
+                    }
+                });
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         }
 
         private void HandleUpdateInfo(UpdateInfo info, bool interactive)
@@ -606,7 +1082,7 @@ namespace CodexUsageTray
 
         private void InstallUpdate(UpdateInfo info)
         {
-            if (updateInstallInProgress)
+            if (shuttingDown || updateInstallInProgress)
             {
                 return;
             }
@@ -615,29 +1091,43 @@ namespace CodexUsageTray
             SetSettingsUpdateButtonState(true, "Installing...");
             SetUpdateStatusText("Installing version " + info.LatestVersion + "...");
 
+            CancellationToken cancellationToken = shutdownCancellation.Token;
             Task.Factory.StartNew(
-                delegate { return UpdateService.InstallUpdate(info); },
-                CancellationToken.None,
+                delegate
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return UpdateService.InstallUpdate(info);
+                },
+                cancellationToken,
                 TaskCreationOptions.None,
                 TaskScheduler.Default).ContinueWith(delegate(Task<string> task)
             {
-                if (!dispatcher.IsDisposed && dispatcher.IsHandleCreated)
+                if (task.IsFaulted)
                 {
-                    dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        if (task.IsFaulted)
-                        {
-                            updateInstallInProgress = false;
-                            SetSettingsUpdateButtonState(false, null);
-                            HandleUpdateError(task.Exception, true);
-                            return;
-                        }
-
-                        notifyIcon.ShowBalloonTip(2000, "Codex Usage Updates", task.Result, ToolTipIcon.Info);
-                        ExitThread();
-                    }));
+                    AggregateException ignored = task.Exception;
                 }
-            });
+
+                TryPostToUi(delegate
+                {
+                    if (task.IsCanceled)
+                    {
+                        updateInstallInProgress = false;
+                        SetSettingsUpdateButtonState(false, null);
+                        SetUpdateStatusText("Update installation canceled.");
+                        return;
+                    }
+                    if (task.IsFaulted)
+                    {
+                        updateInstallInProgress = false;
+                        SetSettingsUpdateButtonState(false, null);
+                        HandleUpdateError(task.Exception, true);
+                        return;
+                    }
+
+                    notifyIcon.ShowBalloonTip(2000, "Codex Usage Updates", task.Result, ToolTipIcon.Info);
+                    ExitThread();
+                });
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         }
 
         private void HandleUpdateError(AggregateException exception, bool interactive)
@@ -697,25 +1187,50 @@ namespace CodexUsageTray
 
         protected override void ExitThreadCore()
         {
+            if (shuttingDown)
+            {
+                return;
+            }
+
+            shuttingDown = true;
+            try
+            {
+                shutdownCancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
             refreshTimer.Stop();
             refreshTimer.Dispose();
+            activityTimer.Stop();
+            activityTimer.Dispose();
             if (startupUiTimer != null)
             {
                 startupUiTimer.Stop();
                 startupUiTimer.Dispose();
+                startupUiTimer = null;
             }
-            usagePopup.Dispose();
-            if (settingsForm != null)
+            if (usagePopup != null && !usagePopup.IsDisposed)
+            {
+                usagePopup.Dispose();
+                usagePopup = null;
+            }
+            if (settingsForm != null && !settingsForm.IsDisposed)
             {
                 settingsForm.Dispose();
+                settingsForm = null;
             }
             notifyIcon.Visible = false;
             notifyIcon.Dispose();
             if (currentIcon != null)
             {
                 currentIcon.Dispose();
+                currentIcon = null;
             }
             dispatcher.Dispose();
+            refreshClock.Stop();
+            shutdownCancellation.Dispose();
             base.ExitThreadCore();
         }
     }

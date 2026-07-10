@@ -1,16 +1,5 @@
 using System;
-using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Web.Script.Serialization;
-using System.Windows.Forms;
+using System.Globalization;
 
 namespace CodexUsageTray
 {
@@ -42,7 +31,8 @@ namespace CodexUsageTray
 
         public static string FormatClock(DateTime value)
         {
-            return value.ToString("h:mm tt");
+            CultureInfo culture = CultureInfo.CurrentCulture;
+            return value.ToString(culture.DateTimeFormat.ShortTimePattern, culture);
         }
 
         public static string FormatResetDateTime(DateTime lastUpdated, int resetAfterSeconds)
@@ -52,7 +42,17 @@ namespace CodexUsageTray
                 resetAfterSeconds = 0;
             }
 
-            return lastUpdated.AddSeconds(resetAfterSeconds).ToString("MMM d, h:mm tt");
+            return FormatDateTime(lastUpdated.AddSeconds(resetAfterSeconds));
+        }
+
+        public static string FormatDateTime(DateTime value)
+        {
+            CultureInfo culture = CultureInfo.CurrentCulture;
+            string datePattern = value.Year == DateTime.Now.Year
+                ? "MMM d"
+                : culture.DateTimeFormat.ShortDatePattern;
+            string pattern = datePattern + ", " + culture.DateTimeFormat.ShortTimePattern;
+            return value.ToString(pattern, culture);
         }
     }
 }

@@ -1,230 +1,1169 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.Drawing;
-using System.Drawing.Drawing2D;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Web.Script.Serialization;
-using System.Windows.Forms;
 
 namespace CodexUsageTray
 {
     internal static class CodexRateLimitClient
     {
-        private const string Endpoint = "https://chatgpt.com/backend-api/codex/responses";
-        private const string UsageProbeModel = "gpt-5.6-sol";
+        private const int FiveHourWindowMinutes = 300;
+        private const int WeeklyWindowMinutes = 10080;
+        private const int RequestTimeoutMilliseconds = 20000;
+        private const int ShutdownTimeoutMilliseconds = 1500;
+        private const int KillTimeoutMilliseconds = 1000;
+
+        private enum FetchErrorKind
+        {
+            CommandNotFound,
+            StartFailed,
+            TimedOut,
+            AuthenticationRequired,
+            ExitedEarly,
+            RequestRejected,
+            InvalidResponse
+        }
+
+        private enum ResponseWaitResult
+        {
+            Success,
+            TimedOut,
+            EndOfStream
+        }
 
         public static UsageSnapshot FetchUsage()
         {
-            AuthData authData = AuthData.Load();
-            if (authData == null || string.IsNullOrEmpty(authData.AccessToken))
+            DateTime attemptedAt = DateTime.Now;
+            string codexCommand = ResolveCodexCommand();
+            if (string.IsNullOrEmpty(codexCommand))
             {
-                return UsageSnapshot.FromError("Codex auth not found; run codex login");
+                return FromClassifiedError(FetchErrorKind.CommandNotFound, attemptedAt);
             }
 
-            string sessionId = GenerateSessionId();
-            byte[] payloadBytes = Encoding.UTF8.GetBytes(BuildPayload(sessionId, UsageProbeModel));
+            Process process = null;
+            ProcessOutputBuffer output = null;
+            ProcessErrorHints errorHints = null;
+            bool processStarted = false;
+            bool rateLimitRequestSent = false;
 
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(Endpoint);
-            request.Method = "POST";
-            request.AllowAutoRedirect = false;
-            request.Timeout = 20000;
-            request.ReadWriteTimeout = 20000;
-            request.Accept = "text/event-stream";
-            request.ContentType = "application/json";
-            request.UserAgent = "codex-usage-tray/1.0.0";
-            request.Headers.Add("OpenAI-Beta", "responses=experimental");
-            request.Headers.Add("session_id", sessionId);
-            request.Headers.Add("originator", "codex_usage_tray");
-            request.Headers.Add("Authorization", "Bearer " + authData.AccessToken);
-            request.Headers.Add("Cache-Control", "no-cache");
-            if (!string.IsNullOrEmpty(authData.AccountId))
+            try
             {
-                request.Headers.Add("chatgpt-account-id", authData.AccountId);
+                JavaScriptSerializer serializer = CreateSerializer();
+                process = new Process();
+                process.StartInfo = CreateStartInfo(codexCommand);
+                output = new ProcessOutputBuffer();
+                errorHints = new ProcessErrorHints();
+                process.OutputDataReceived += output.HandleDataReceived;
+                process.ErrorDataReceived += errorHints.HandleDataReceived;
+
+                if (!process.Start())
+                {
+                    return FromClassifiedError(FetchErrorKind.StartFailed, attemptedAt);
+                }
+
+                processStarted = true;
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                Stopwatch timer = Stopwatch.StartNew();
+                SendInitialize(process.StandardInput, serializer);
+
+                Dictionary<string, object> initializeResponse;
+                ResponseWaitResult initializeWait = WaitForResponse(
+                    process,
+                    output,
+                    serializer,
+                    timer,
+                    1,
+                    out initializeResponse);
+                if (initializeWait != ResponseWaitResult.Success)
+                {
+                    return FromWaitError(initializeWait, errorHints, attemptedAt);
+                }
+
+                Dictionary<string, object> initializeError;
+                if (TryGetDictionary(initializeResponse, "error", out initializeError))
+                {
+                    return FromRpcError(initializeError, attemptedAt);
+                }
+
+                Dictionary<string, object> initializeResult;
+                if (!TryGetDictionary(initializeResponse, "result", out initializeResult))
+                {
+                    return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+                }
+
+                SendInitialized(process.StandardInput, serializer);
+                SendRateLimitRequest(process.StandardInput, serializer);
+                rateLimitRequestSent = true;
+
+                Dictionary<string, object> rateLimitResponse;
+                ResponseWaitResult rateLimitWait = WaitForResponse(
+                    process,
+                    output,
+                    serializer,
+                    timer,
+                    2,
+                    out rateLimitResponse);
+                if (rateLimitWait != ResponseWaitResult.Success)
+                {
+                    return FromWaitError(rateLimitWait, errorHints, attemptedAt);
+                }
+
+                CloseStandardInput(process);
+
+                Dictionary<string, object> rateLimitError;
+                if (TryGetDictionary(rateLimitResponse, "error", out rateLimitError))
+                {
+                    return FromRpcError(rateLimitError, attemptedAt);
+                }
+
+                return ParseRateLimitsResponse(rateLimitResponse, attemptedAt);
             }
-
-            request.ContentLength = payloadBytes.Length;
-            using (Stream requestStream = request.GetRequestStream())
+            catch (Exception)
             {
-                requestStream.Write(payloadBytes, 0, payloadBytes.Length);
+                if (errorHints != null && errorHints.AuthenticationRequired)
+                {
+                    return FromClassifiedError(FetchErrorKind.AuthenticationRequired, attemptedAt);
+                }
+
+                return FromClassifiedError(
+                    rateLimitRequestSent ? FetchErrorKind.ExitedEarly : FetchErrorKind.StartFailed,
+                    attemptedAt);
+            }
+            finally
+            {
+                CloseStandardInput(process);
+                StopProcess(process, processStarted);
+
+                if (process != null && output != null)
+                {
+                    process.OutputDataReceived -= output.HandleDataReceived;
+                }
+                if (process != null && errorHints != null)
+                {
+                    process.ErrorDataReceived -= errorHints.HandleDataReceived;
+                }
+                if (output != null)
+                {
+                    output.Dispose();
+                }
+                if (process != null)
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        internal static UsageSnapshot ParseRateLimitsResponse(string json)
+        {
+            return ParseRateLimitsResponse(json, DateTime.Now);
+        }
+
+        internal static UsageSnapshot ParseRateLimitsResponse(string json, DateTime attemptedAt)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
             }
 
             try
             {
-                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                object rootObject = CreateSerializer().DeserializeObject(json);
+                Dictionary<string, object> root = rootObject as Dictionary<string, object>;
+                if (root == null)
                 {
-                    return ParseSnapshot(response.Headers, null);
+                    return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
                 }
+
+                return ParseRateLimitsResponse(root, attemptedAt);
             }
-            catch (WebException ex)
+            catch (ArgumentException)
             {
-                HttpWebResponse response = ex.Response as HttpWebResponse;
-                if (response != null)
-                {
-                    using (response)
-                    {
-                        UsageSnapshot snapshot = ParseSnapshot(response.Headers, null);
-                        if (snapshot.HasAnyLimit)
-                        {
-                            return snapshot;
-                        }
-
-                        string errorBody = ReadResponseBody(response);
-                        string errorMessage = "Codex request failed: HTTP " + (int)response.StatusCode;
-                        if (!string.IsNullOrEmpty(errorBody))
-                        {
-                            errorMessage += " - " + errorBody;
-                        }
-                        return UsageSnapshot.FromError(errorMessage);
-                    }
-                }
-
-                return UsageSnapshot.FromError("Codex request failed: " + ex.Message);
+                return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+            }
+            catch (InvalidOperationException)
+            {
+                return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
             }
         }
 
-        private static UsageSnapshot ParseSnapshot(NameValueCollection headers, string error)
+        private static UsageSnapshot ParseRateLimitsResponse(
+            Dictionary<string, object> response,
+            DateTime attemptedAt)
         {
+            Dictionary<string, object> error;
+            if (TryGetDictionary(response, "error", out error))
+            {
+                return FromRpcError(error, attemptedAt);
+            }
+
+            Dictionary<string, object> payload = response;
+            object resultObject;
+            if (response.TryGetValue("result", out resultObject))
+            {
+                payload = resultObject as Dictionary<string, object>;
+                if (payload == null)
+                {
+                    return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+                }
+            }
+
+            Dictionary<string, object> rateLimitsById = null;
+            object rateLimitsByIdObject;
+            if (payload.TryGetValue("rateLimitsByLimitId", out rateLimitsByIdObject) &&
+                rateLimitsByIdObject != null)
+            {
+                rateLimitsById = rateLimitsByIdObject as Dictionary<string, object>;
+                if (rateLimitsById == null)
+                {
+                    return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+                }
+            }
+
+            Dictionary<string, object> codexLimits = null;
+            object rateLimitsObject;
+            if (payload.TryGetValue("rateLimits", out rateLimitsObject) && rateLimitsObject != null)
+            {
+                codexLimits = rateLimitsObject as Dictionary<string, object>;
+                if (codexLimits == null)
+                {
+                    return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+                }
+            }
+
+            Dictionary<string, object> mappedCodexLimits = GetLimitById(rateLimitsById, "codex");
+            if (codexLimits == null)
+            {
+                codexLimits = mappedCodexLimits;
+            }
+
             UsageSnapshot snapshot = new UsageSnapshot();
-            snapshot.LastUpdated = DateTime.Now;
-            snapshot.ErrorMessage = error;
-            snapshot.FiveHour = ParseWindow(headers, "x-codex-primary");
-            snapshot.Weekly = ParseWindow(headers, "x-codex-secondary");
+            snapshot.LastUpdated = attemptedAt;
+            snapshot.LastAttempted = attemptedAt;
+
+            if (codexLimits != null)
+            {
+                ParseLimitWindows(codexLimits, attemptedAt, out snapshot.FiveHour, out snapshot.Weekly);
+                snapshot.PlanType = GetOptionalString(codexLimits, "planType");
+            }
+
+            if (string.IsNullOrEmpty(snapshot.PlanType) && mappedCodexLimits != null)
+            {
+                snapshot.PlanType = GetOptionalString(mappedCodexLimits, "planType");
+            }
+
+            snapshot.AvailableResetCount = ParseAvailableResetCount(payload);
+            snapshot.AvailableResets = ParseAvailableResetCredits(payload);
+            snapshot.AdditionalLimits = ParseAdditionalLimits(rateLimitsById, attemptedAt);
+
+            if (!snapshot.HasAnyLimit)
+            {
+                return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+            }
+
             return snapshot;
         }
 
-        private static LimitWindow ParseWindow(NameValueCollection headers, string prefix)
+        private static List<UsageLimitSet> ParseAdditionalLimits(
+            Dictionary<string, object> rateLimitsById,
+            DateTime attemptedAt)
         {
+            List<UsageLimitSet> limits = new List<UsageLimitSet>();
+            if (rateLimitsById == null)
+            {
+                return limits;
+            }
+
+            foreach (KeyValuePair<string, object> entry in rateLimitsById)
+            {
+                if (string.Equals(entry.Key, "codex", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> limitSnapshot = entry.Value as Dictionary<string, object>;
+                if (limitSnapshot == null)
+                {
+                    continue;
+                }
+
+                UsageLimitSet limit = new UsageLimitSet();
+                limit.LimitId = entry.Key;
+                limit.DisplayName = GetOptionalString(limitSnapshot, "limitName");
+                if (string.IsNullOrWhiteSpace(limit.DisplayName))
+                {
+                    limit.DisplayName = entry.Key;
+                }
+
+                ParseLimitWindows(limitSnapshot, attemptedAt, out limit.FiveHour, out limit.Weekly);
+                limits.Add(limit);
+            }
+
+            limits.Sort(delegate(UsageLimitSet left, UsageLimitSet right)
+            {
+                int displayNameOrder = string.Compare(
+                    left != null ? left.DisplayName : null,
+                    right != null ? right.DisplayName : null,
+                    StringComparison.OrdinalIgnoreCase);
+                if (displayNameOrder != 0)
+                {
+                    return displayNameOrder;
+                }
+
+                return string.Compare(
+                    left != null ? left.LimitId : null,
+                    right != null ? right.LimitId : null,
+                    StringComparison.OrdinalIgnoreCase);
+            });
+
+            return limits;
+        }
+
+        private static void ParseLimitWindows(
+            Dictionary<string, object> limitSnapshot,
+            DateTime attemptedAt,
+            out LimitWindow fiveHour,
+            out LimitWindow weekly)
+        {
+            fiveHour = null;
+            weekly = null;
+
+            LimitWindow primary = ParseWindow(limitSnapshot, "primary", attemptedAt);
+            AssignWindow(primary, ref fiveHour, ref weekly);
+
+            LimitWindow secondary = ParseWindow(limitSnapshot, "secondary", attemptedAt);
+            AssignWindow(secondary, ref fiveHour, ref weekly);
+        }
+
+        private static void AssignWindow(
+            LimitWindow window,
+            ref LimitWindow fiveHour,
+            ref LimitWindow weekly)
+        {
+            if (window == null || !window.WindowMinutes.HasValue)
+            {
+                return;
+            }
+
+            if (window.WindowMinutes.Value == FiveHourWindowMinutes && fiveHour == null)
+            {
+                fiveHour = window;
+            }
+            else if (window.WindowMinutes.Value == WeeklyWindowMinutes && weekly == null)
+            {
+                weekly = window;
+            }
+        }
+
+        private static LimitWindow ParseWindow(
+            Dictionary<string, object> limitSnapshot,
+            string name,
+            DateTime attemptedAt)
+        {
+            Dictionary<string, object> windowValues;
+            if (!TryGetDictionary(limitSnapshot, name, out windowValues))
+            {
+                return null;
+            }
+
+            object durationObject;
+            long duration;
+            if (!windowValues.TryGetValue("windowDurationMins", out durationObject) ||
+                !TryGetInteger(durationObject, out duration) ||
+                (duration != FiveHourWindowMinutes && duration != WeeklyWindowMinutes))
+            {
+                return null;
+            }
+
+            object usedPercentObject;
             double usedPercent;
-            if (!TryGetDoubleHeader(headers, prefix + "-used-percent", out usedPercent))
+            if (!windowValues.TryGetValue("usedPercent", out usedPercentObject) ||
+                !TryGetFiniteDouble(usedPercentObject, out usedPercent) ||
+                usedPercent < 0.0 || usedPercent > 100.0)
             {
                 return null;
             }
 
             LimitWindow window = new LimitWindow();
             window.UsedPercent = usedPercent;
-            window.WindowMinutes = TryGetIntHeader(headers, prefix + "-window-minutes");
-            window.ResetAfterSeconds = TryGetIntHeader(headers, prefix + "-reset-after-seconds");
+            window.WindowMinutes = (int)duration;
+
+            object resetsAtObject;
+            long resetsAt;
+            if (windowValues.TryGetValue("resetsAt", out resetsAtObject) &&
+                resetsAtObject != null &&
+                TryGetInteger(resetsAtObject, out resetsAt))
+            {
+                window.ResetAfterSeconds = GetResetAfterSeconds(resetsAt, attemptedAt);
+            }
+
             return window;
         }
 
-        private static bool TryGetDoubleHeader(NameValueCollection headers, string name, out double value)
-        {
-            string raw = GetHeader(headers, name);
-            if (raw != null && double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value))
-            {
-                return true;
-            }
-
-            value = 0;
-            return false;
-        }
-
-        private static int? TryGetIntHeader(NameValueCollection headers, string name)
-        {
-            string raw = GetHeader(headers, name);
-            int value;
-            if (raw != null && int.TryParse(raw, out value))
-            {
-                return value;
-            }
-
-            return null;
-        }
-
-        private static string GetHeader(NameValueCollection headers, string name)
-        {
-            if (headers == null)
-            {
-                return null;
-            }
-
-            foreach (string key in headers.AllKeys)
-            {
-                if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
-                {
-                    return headers[key];
-                }
-            }
-
-            return null;
-        }
-
-        private static string ReadResponseBody(HttpWebResponse response)
+        private static int? GetResetAfterSeconds(long resetsAtUnixSeconds, DateTime attemptedAt)
         {
             try
             {
-                using (Stream stream = response.GetResponseStream())
+                DateTime unixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                DateTime resetsAt = unixEpoch.AddSeconds(resetsAtUnixSeconds);
+                double remainingSeconds = (resetsAt - attemptedAt.ToUniversalTime()).TotalSeconds;
+                if (double.IsNaN(remainingSeconds) || double.IsInfinity(remainingSeconds))
                 {
-                    if (stream == null)
-                    {
-                        return null;
-                    }
-
-                    using (StreamReader reader = new StreamReader(stream))
-                    {
-                        string body = reader.ReadToEnd();
-                        if (body.Length > 240)
-                        {
-                            return body.Substring(0, 240);
-                        }
-                        return body;
-                    }
+                    return null;
                 }
+                if (remainingSeconds <= 0.0)
+                {
+                    return 0;
+                }
+                if (remainingSeconds >= int.MaxValue)
+                {
+                    return int.MaxValue;
+                }
+
+                return (int)Math.Ceiling(remainingSeconds);
             }
-            catch
+            catch (ArgumentOutOfRangeException)
             {
                 return null;
             }
         }
 
-        private static string BuildPayload(string sessionId, string model)
+        private static int? ParseAvailableResetCount(Dictionary<string, object> payload)
         {
-            Dictionary<string, object> text = new Dictionary<string, object>();
-            text["type"] = "input_text";
-            text["text"] = "hi";
+            Dictionary<string, object> resetCredits;
+            if (!TryGetDictionary(payload, "rateLimitResetCredits", out resetCredits))
+            {
+                return null;
+            }
 
-            Dictionary<string, object> message = new Dictionary<string, object>();
-            message["type"] = "message";
-            message["id"] = null;
-            message["role"] = "user";
-            message["content"] = new object[] { text };
+            object availableCountObject;
+            long availableCount;
+            if (!resetCredits.TryGetValue("availableCount", out availableCountObject) ||
+                !TryGetInteger(availableCountObject, out availableCount) ||
+                availableCount < 0 || availableCount > int.MaxValue)
+            {
+                return null;
+            }
 
-            Dictionary<string, object> reasoning = new Dictionary<string, object>();
-            reasoning["effort"] = "medium";
-            reasoning["summary"] = "auto";
-
-            Dictionary<string, object> payload = new Dictionary<string, object>();
-            payload["model"] = model;
-            payload["instructions"] = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.";
-            payload["input"] = new object[] { message };
-            payload["tools"] = new object[0];
-            payload["tool_choice"] = "auto";
-            payload["parallel_tool_calls"] = false;
-            payload["reasoning"] = reasoning;
-            payload["store"] = false;
-            payload["stream"] = true;
-            payload["include"] = new object[] { "reasoning.encrypted_content" };
-            payload["prompt_cache_key"] = sessionId;
-
-            return new JavaScriptSerializer().Serialize(payload);
+            return (int)availableCount;
         }
 
-        private static string GenerateSessionId()
+        private static List<RateLimitResetCredit> ParseAvailableResetCredits(
+            Dictionary<string, object> payload)
         {
-            byte[] bytes = new byte[16];
-            new Random().NextBytes(bytes);
-            StringBuilder builder = new StringBuilder(bytes.Length * 2);
-            for (int i = 0; i < bytes.Length; i++)
+            List<RateLimitResetCredit> availableCredits = new List<RateLimitResetCredit>();
+            Dictionary<string, object> resetCredits;
+            if (!TryGetDictionary(payload, "rateLimitResetCredits", out resetCredits))
             {
-                builder.Append(bytes[i].ToString("x2"));
+                return availableCredits;
             }
-            return builder.ToString();
+
+            object creditsObject;
+            object[] credits;
+            if (!resetCredits.TryGetValue("credits", out creditsObject) ||
+                creditsObject == null ||
+                (credits = creditsObject as object[]) == null)
+            {
+                return availableCredits;
+            }
+
+            for (int index = 0; index < credits.Length; index++)
+            {
+                Dictionary<string, object> values = credits[index] as Dictionary<string, object>;
+                if (values == null)
+                {
+                    continue;
+                }
+
+                string status = GetOptionalString(values, "status");
+                if (!string.IsNullOrEmpty(status) &&
+                    !string.Equals(status, "available", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                RateLimitResetCredit credit = new RateLimitResetCredit();
+                credit.Title = GetOptionalString(values, "title");
+
+                object expiresAtObject;
+                long expiresAt;
+                if (values.TryGetValue("expiresAt", out expiresAtObject) &&
+                    expiresAtObject != null &&
+                    TryGetInteger(expiresAtObject, out expiresAt))
+                {
+                    credit.ExpiresAtUtc = GetUnixDateTimeUtc(expiresAt);
+                }
+
+                availableCredits.Add(credit);
+            }
+
+            availableCredits.Sort(delegate(
+                RateLimitResetCredit left,
+                RateLimitResetCredit right)
+            {
+                DateTime leftExpiration = left != null && left.ExpiresAtUtc.HasValue
+                    ? left.ExpiresAtUtc.Value
+                    : DateTime.MaxValue;
+                DateTime rightExpiration = right != null && right.ExpiresAtUtc.HasValue
+                    ? right.ExpiresAtUtc.Value
+                    : DateTime.MaxValue;
+                return leftExpiration.CompareTo(rightExpiration);
+            });
+
+            return availableCredits;
+        }
+
+        private static DateTime? GetUnixDateTimeUtc(long unixSeconds)
+        {
+            try
+            {
+                return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+                    .AddSeconds(unixSeconds);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return null;
+            }
+        }
+
+        private static Dictionary<string, object> GetLimitById(
+            Dictionary<string, object> rateLimitsById,
+            string limitId)
+        {
+            if (rateLimitsById == null)
+            {
+                return null;
+            }
+
+            foreach (KeyValuePair<string, object> entry in rateLimitsById)
+            {
+                if (string.Equals(entry.Key, limitId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return entry.Value as Dictionary<string, object>;
+                }
+            }
+
+            return null;
+        }
+
+        private static ResponseWaitResult WaitForResponse(
+            Process process,
+            ProcessOutputBuffer output,
+            JavaScriptSerializer serializer,
+            Stopwatch timer,
+            int requestId,
+            out Dictionary<string, object> response)
+        {
+            response = null;
+
+            while (timer.ElapsedMilliseconds < RequestTimeoutMilliseconds)
+            {
+                string line;
+                while (output.TryDequeue(out line))
+                {
+                    Dictionary<string, object> candidate;
+                    if (TryDeserializeObject(serializer, line, out candidate) &&
+                        HasRequestId(candidate, requestId))
+                    {
+                        response = candidate;
+                        return ResponseWaitResult.Success;
+                    }
+                }
+
+                if (output.EndOfStream)
+                {
+                    return ResponseWaitResult.EndOfStream;
+                }
+
+                long remaining = RequestTimeoutMilliseconds - timer.ElapsedMilliseconds;
+                int waitMilliseconds = (int)Math.Min(100L, Math.Max(1L, remaining));
+                output.Wait(waitMilliseconds);
+            }
+
+            return ResponseWaitResult.TimedOut;
+        }
+
+        private static bool TryDeserializeObject(
+            JavaScriptSerializer serializer,
+            string json,
+            out Dictionary<string, object> value)
+        {
+            value = null;
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return false;
+            }
+
+            try
+            {
+                value = serializer.DeserializeObject(json) as Dictionary<string, object>;
+                return value != null;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static bool HasRequestId(Dictionary<string, object> response, int requestId)
+        {
+            object idObject;
+            if (!response.TryGetValue("id", out idObject) || idObject == null)
+            {
+                return false;
+            }
+
+            string stringId = idObject as string;
+            if (stringId != null)
+            {
+                return string.Equals(
+                    stringId,
+                    requestId.ToString(CultureInfo.InvariantCulture),
+                    StringComparison.Ordinal);
+            }
+
+            long numericId;
+            return TryGetInteger(idObject, out numericId) && numericId == requestId;
+        }
+
+        private static void SendInitialize(StreamWriter input, JavaScriptSerializer serializer)
+        {
+            Dictionary<string, object> clientInfo = new Dictionary<string, object>();
+            clientInfo["name"] = "codex-usage-tray";
+            clientInfo["title"] = "Codex Usage Tray";
+            clientInfo["version"] = "1.0";
+
+            Dictionary<string, object> parameters = new Dictionary<string, object>();
+            parameters["clientInfo"] = clientInfo;
+            parameters["capabilities"] = new Dictionary<string, object>();
+
+            Dictionary<string, object> request = new Dictionary<string, object>();
+            request["id"] = 1;
+            request["method"] = "initialize";
+            request["params"] = parameters;
+            SendMessage(input, serializer, request);
+        }
+
+        private static void SendInitialized(StreamWriter input, JavaScriptSerializer serializer)
+        {
+            Dictionary<string, object> notification = new Dictionary<string, object>();
+            notification["method"] = "initialized";
+            SendMessage(input, serializer, notification);
+        }
+
+        private static void SendRateLimitRequest(StreamWriter input, JavaScriptSerializer serializer)
+        {
+            Dictionary<string, object> request = new Dictionary<string, object>();
+            request["id"] = 2;
+            request["method"] = "account/rateLimits/read";
+            SendMessage(input, serializer, request);
+        }
+
+        private static void SendMessage(
+            StreamWriter input,
+            JavaScriptSerializer serializer,
+            Dictionary<string, object> message)
+        {
+            input.WriteLine(serializer.Serialize(message));
+            input.Flush();
+        }
+
+        private static JavaScriptSerializer CreateSerializer()
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = 4 * 1024 * 1024;
+            return serializer;
+        }
+
+        private static string ResolveCodexCommand()
+        {
+            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            if (!string.IsNullOrEmpty(appData))
+            {
+                string nativeCommand = FindBundledCodexExecutable(appData);
+                if (!string.IsNullOrEmpty(nativeCommand))
+                {
+                    return nativeCommand;
+                }
+
+                string npmCommand = Path.Combine(appData, "npm", "codex.cmd");
+                string npmScript = Path.Combine(
+                    appData,
+                    "npm",
+                    "node_modules",
+                    "@openai",
+                    "codex",
+                    "bin",
+                    "codex.js");
+                if (File.Exists(npmCommand) && File.Exists(npmScript))
+                {
+                    return Path.GetFullPath(npmCommand);
+                }
+            }
+
+            string pathValue = Environment.GetEnvironmentVariable("PATH");
+            if (string.IsNullOrWhiteSpace(pathValue))
+            {
+                return null;
+            }
+
+            string[] extensions = { ".exe", ".com", ".cmd", ".bat", "" };
+            string[] pathEntries = pathValue.Split(Path.PathSeparator);
+            for (int pathIndex = 0; pathIndex < pathEntries.Length; pathIndex++)
+            {
+                string directory = pathEntries[pathIndex].Trim().Trim('"');
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    continue;
+                }
+
+                directory = Environment.ExpandEnvironmentVariables(directory);
+                for (int extensionIndex = 0; extensionIndex < extensions.Length; extensionIndex++)
+                {
+                    try
+                    {
+                        string candidate = Path.Combine(directory, "codex" + extensions[extensionIndex]);
+                        if (File.Exists(candidate))
+                        {
+                            return Path.GetFullPath(candidate);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // Ignore malformed PATH entries and continue searching.
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static string FindBundledCodexExecutable(string appData)
+        {
+            string packageRoot = Path.Combine(
+                appData,
+                "npm",
+                "node_modules",
+                "@openai",
+                "codex",
+                "node_modules",
+                "@openai");
+            if (!Directory.Exists(packageRoot))
+            {
+                return null;
+            }
+
+            try
+            {
+                string[] packages = Directory.GetDirectories(packageRoot, "codex-win32-*");
+                for (int packageIndex = 0; packageIndex < packages.Length; packageIndex++)
+                {
+                    string[] executables = Directory.GetFiles(
+                        packages[packageIndex],
+                        "codex.exe",
+                        SearchOption.AllDirectories);
+                    if (executables.Length > 0)
+                    {
+                        return Path.GetFullPath(executables[0]);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            return null;
+        }
+
+        private static ProcessStartInfo CreateStartInfo(string codexCommand)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            string extension = Path.GetExtension(codexCommand);
+            if (string.Equals(extension, ".cmd", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(extension, ".bat", StringComparison.OrdinalIgnoreCase))
+            {
+                startInfo.FileName = ResolveCommandInterpreter();
+                startInfo.Arguments = "/d /s /c \"\"" + codexCommand + "\" app-server --stdio\"";
+            }
+            else
+            {
+                startInfo.FileName = codexCommand;
+                startInfo.Arguments = "app-server --stdio";
+            }
+
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+            startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+            startInfo.RedirectStandardInput = true;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+            return startInfo;
+        }
+
+        private static string ResolveCommandInterpreter()
+        {
+            string commandInterpreter = Environment.GetEnvironmentVariable("ComSpec");
+            if (!string.IsNullOrWhiteSpace(commandInterpreter) && File.Exists(commandInterpreter))
+            {
+                return commandInterpreter;
+            }
+
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        }
+
+        private static UsageSnapshot FromWaitError(
+            ResponseWaitResult waitResult,
+            ProcessErrorHints errorHints,
+            DateTime attemptedAt)
+        {
+            if (errorHints != null && errorHints.AuthenticationRequired)
+            {
+                return FromClassifiedError(FetchErrorKind.AuthenticationRequired, attemptedAt);
+            }
+
+            return FromClassifiedError(
+                waitResult == ResponseWaitResult.TimedOut
+                    ? FetchErrorKind.TimedOut
+                    : FetchErrorKind.ExitedEarly,
+                attemptedAt);
+        }
+
+        private static UsageSnapshot FromRpcError(
+            Dictionary<string, object> error,
+            DateTime attemptedAt)
+        {
+            string message = GetOptionalString(error, "message");
+            FetchErrorKind kind = IsAuthenticationMessage(message)
+                ? FetchErrorKind.AuthenticationRequired
+                : FetchErrorKind.RequestRejected;
+            return FromClassifiedError(kind, attemptedAt);
+        }
+
+        private static bool IsAuthenticationMessage(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return false;
+            }
+
+            string lower = message.ToLowerInvariant();
+            return lower.Contains("not logged in") ||
+                lower.Contains("not signed in") ||
+                lower.Contains("unauthorized") ||
+                lower.Contains("authentication") ||
+                lower.Contains("codex login") ||
+                lower.Contains("401");
+        }
+
+        private static UsageSnapshot FromClassifiedError(FetchErrorKind kind, DateTime attemptedAt)
+        {
+            string message;
+            switch (kind)
+            {
+                case FetchErrorKind.CommandNotFound:
+                    message = "Codex CLI was not found. Install Codex or add it to PATH.";
+                    break;
+                case FetchErrorKind.StartFailed:
+                    message = "Codex app-server could not be started.";
+                    break;
+                case FetchErrorKind.TimedOut:
+                    message = "Codex app-server timed out while reading usage.";
+                    break;
+                case FetchErrorKind.AuthenticationRequired:
+                    message = "Codex is not signed in. Run codex login.";
+                    break;
+                case FetchErrorKind.ExitedEarly:
+                    message = "Codex app-server exited before returning usage.";
+                    break;
+                case FetchErrorKind.RequestRejected:
+                    message = "Codex app-server could not read usage limits.";
+                    break;
+                default:
+                    message = "Codex app-server returned invalid usage data.";
+                    break;
+            }
+
+            UsageSnapshot snapshot = UsageSnapshot.FromError(message);
+            snapshot.LastAttempted = attemptedAt;
+            return snapshot;
+        }
+
+        private static bool TryGetDictionary(
+            Dictionary<string, object> values,
+            string name,
+            out Dictionary<string, object> result)
+        {
+            result = null;
+            if (values == null)
+            {
+                return false;
+            }
+
+            object value;
+            if (!values.TryGetValue(name, out value) || value == null)
+            {
+                return false;
+            }
+
+            result = value as Dictionary<string, object>;
+            return result != null;
+        }
+
+        private static string GetOptionalString(Dictionary<string, object> values, string name)
+        {
+            if (values == null)
+            {
+                return null;
+            }
+
+            object value;
+            string text;
+            if (!values.TryGetValue(name, out value) ||
+                value == null ||
+                (text = value as string) == null)
+            {
+                return null;
+            }
+
+            text = text.Trim();
+            return text.Length == 0 ? null : text;
+        }
+
+        private static bool TryGetInteger(object value, out long result)
+        {
+            result = 0;
+            if (value == null || value is bool || value is char || value is string)
+            {
+                return false;
+            }
+
+            if (value is float || value is double)
+            {
+                double numeric = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                if (double.IsNaN(numeric) ||
+                    double.IsInfinity(numeric) ||
+                    numeric < long.MinValue ||
+                    numeric > long.MaxValue ||
+                    Math.Truncate(numeric) != numeric)
+                {
+                    return false;
+                }
+
+                result = (long)numeric;
+                return true;
+            }
+
+            if (!(value is byte) && !(value is sbyte) &&
+                !(value is short) && !(value is ushort) &&
+                !(value is int) && !(value is uint) &&
+                !(value is long) && !(value is ulong) &&
+                !(value is decimal))
+            {
+                return false;
+            }
+
+            try
+            {
+                decimal numeric = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                if (decimal.Truncate(numeric) != numeric ||
+                    numeric < long.MinValue || numeric > long.MaxValue)
+                {
+                    return false;
+                }
+
+                result = decimal.ToInt64(numeric);
+                return true;
+            }
+            catch (OverflowException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryGetFiniteDouble(object value, out double result)
+        {
+            result = 0.0;
+            if (value == null || value is bool || value is char || value is string)
+            {
+                return false;
+            }
+
+            if (!(value is byte) && !(value is sbyte) &&
+                !(value is short) && !(value is ushort) &&
+                !(value is int) && !(value is uint) &&
+                !(value is long) && !(value is ulong) &&
+                !(value is float) && !(value is double) &&
+                !(value is decimal))
+            {
+                return false;
+            }
+
+            try
+            {
+                result = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                return !double.IsNaN(result) && !double.IsInfinity(result);
+            }
+            catch (OverflowException)
+            {
+                result = 0.0;
+                return false;
+            }
+        }
+
+        private static void CloseStandardInput(Process process)
+        {
+            if (process == null)
+            {
+                return;
+            }
+
+            try
+            {
+                process.StandardInput.Close();
+            }
+            catch (Exception)
+            {
+                // The process may already have closed its redirected input.
+            }
+        }
+
+        private static void StopProcess(Process process, bool processStarted)
+        {
+            if (process == null || !processStarted)
+            {
+                return;
+            }
+
+            try
+            {
+                if (process.WaitForExit(ShutdownTimeoutMilliseconds))
+                {
+                    return;
+                }
+            }
+            catch (Exception)
+            {
+                // Fall through to the guarded kill attempt.
+            }
+
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                }
+            }
+            catch (Exception)
+            {
+                return;
+            }
+
+            try
+            {
+                process.WaitForExit(KillTimeoutMilliseconds);
+            }
+            catch (Exception)
+            {
+                // Cleanup is best-effort after killing only the process we started.
+            }
+        }
+
+        private sealed class ProcessOutputBuffer : IDisposable
+        {
+            private readonly object syncRoot = new object();
+            private readonly Queue<string> lines = new Queue<string>();
+            private readonly AutoResetEvent dataAvailable = new AutoResetEvent(false);
+            private bool endOfStream;
+
+            public bool EndOfStream
+            {
+                get
+                {
+                    lock (syncRoot)
+                    {
+                        return endOfStream && lines.Count == 0;
+                    }
+                }
+            }
+
+            public void HandleDataReceived(object sender, DataReceivedEventArgs args)
+            {
+                lock (syncRoot)
+                {
+                    if (args.Data == null)
+                    {
+                        endOfStream = true;
+                    }
+                    else
+                    {
+                        lines.Enqueue(args.Data);
+                    }
+                }
+
+                try
+                {
+                    dataAvailable.Set();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Process shutdown raced with disposal.
+                }
+            }
+
+            public bool TryDequeue(out string line)
+            {
+                lock (syncRoot)
+                {
+                    if (lines.Count == 0)
+                    {
+                        line = null;
+                        return false;
+                    }
+
+                    line = lines.Dequeue();
+                    return true;
+                }
+            }
+
+            public void Wait(int milliseconds)
+            {
+                dataAvailable.WaitOne(milliseconds);
+            }
+
+            public void Dispose()
+            {
+                dataAvailable.Dispose();
+            }
+        }
+
+        private sealed class ProcessErrorHints
+        {
+            private volatile bool authenticationRequired;
+
+            public bool AuthenticationRequired
+            {
+                get { return authenticationRequired; }
+            }
+
+            public void HandleDataReceived(object sender, DataReceivedEventArgs args)
+            {
+                if (args.Data != null && IsAuthenticationMessage(args.Data))
+                {
+                    authenticationRequired = true;
+                }
+            }
         }
     }
 }

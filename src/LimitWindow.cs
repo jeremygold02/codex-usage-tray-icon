@@ -1,16 +1,4 @@
 using System;
-using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Web.Script.Serialization;
-using System.Windows.Forms;
 
 namespace CodexUsageTray
 {
@@ -35,6 +23,11 @@ namespace CodexUsageTray
                 }
                 return (int)Math.Round(remaining);
             }
+        }
+
+        public LimitWindow Clone()
+        {
+            return (LimitWindow)MemberwiseClone();
         }
     }
 }

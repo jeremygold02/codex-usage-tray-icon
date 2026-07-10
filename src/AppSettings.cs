@@ -1,22 +1,15 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Web.Script.Serialization;
-using System.Windows.Forms;
 
 namespace CodexUsageTray
 {
     internal sealed class AppSettings
     {
-        public const int CurrentSettingsVersion = 5;
+        public const int CurrentSettingsVersion = 6;
         public const string DefaultTrayBoxColor = "#0078D7";
         public const string DefaultTrayTextColor = "#FFFFFF";
         public const string IconMetricWeekly = "Weekly";
@@ -24,6 +17,18 @@ namespace CodexUsageTray
         public const string ThemeSystem = "System Default";
         public const string ThemeDark = "Dark Mode";
         public const string ThemeLight = "Light Mode";
+
+        private bool saveBlockedByNewerVersion;
+        private int protectedSettingsVersion;
+        private string protectedSettingsPath;
+
+        private enum SettingsFileResult
+        {
+            Missing,
+            Invalid,
+            Loaded,
+            NewerVersion
+        }
 
         public int SettingsVersion { get; set; }
         public bool OverlayNumber { get; set; }
@@ -33,6 +38,8 @@ namespace CodexUsageTray
         public bool ColorBars { get; set; }
         public bool ShowPopupResetTimes { get; set; }
         public bool ShowPopupLastUpdated { get; set; }
+        public bool ShowAdditionalLimits { get; set; }
+        public bool ShowResetAvailability { get; set; }
         public bool StartWithWindows { get; set; }
         public bool ThresholdNotifications { get; set; }
         public int RefreshSeconds { get; set; }
@@ -42,6 +49,19 @@ namespace CodexUsageTray
         public string TrayBoxColor { get; set; }
         public string TrayTextColor { get; set; }
         public string Theme { get; set; }
+
+        internal bool IsSaveBlockedByNewerVersion
+        {
+            get { return saveBlockedByNewerVersion; }
+        }
+
+        internal string SaveBlockedMessage
+        {
+            get
+            {
+                return BuildNewerVersionMessage(protectedSettingsVersion, protectedSettingsPath);
+            }
+        }
 
         public AppSettings()
         {
@@ -53,6 +73,8 @@ namespace CodexUsageTray
             ColorBars = true;
             ShowPopupResetTimes = true;
             ShowPopupLastUpdated = true;
+            ShowAdditionalLimits = true;
+            ShowResetAvailability = true;
             StartWithWindows = false;
             ThresholdNotifications = false;
             RefreshSeconds = 300;
@@ -64,30 +86,58 @@ namespace CodexUsageTray
             Theme = ThemeSystem;
         }
 
+        internal AppSettings Clone()
+        {
+            return (AppSettings)MemberwiseClone();
+        }
+
+        internal void CopyValuesFrom(AppSettings source)
+        {
+            if (source == null)
+            {
+                throw new ArgumentNullException("source");
+            }
+
+            SettingsVersion = source.SettingsVersion;
+            OverlayNumber = source.OverlayNumber;
+            CriticalThreshold = source.CriticalThreshold;
+            LowThreshold = source.LowThreshold;
+            IconMetric = source.IconMetric;
+            ColorBars = source.ColorBars;
+            ShowPopupResetTimes = source.ShowPopupResetTimes;
+            ShowPopupLastUpdated = source.ShowPopupLastUpdated;
+            ShowAdditionalLimits = source.ShowAdditionalLimits;
+            ShowResetAvailability = source.ShowResetAvailability;
+            StartWithWindows = source.StartWithWindows;
+            ThresholdNotifications = source.ThresholdNotifications;
+            RefreshSeconds = source.RefreshSeconds;
+            IdleRefreshSeconds = source.IdleRefreshSeconds;
+            ShowTrayBox = source.ShowTrayBox;
+            UseCustomTrayBoxColor = source.UseCustomTrayBoxColor;
+            TrayBoxColor = source.TrayBoxColor;
+            TrayTextColor = source.TrayTextColor;
+            Theme = source.Theme;
+        }
+
         public static AppSettings Load()
         {
-            try
+            return LoadFromPath(GetSettingsPath());
+        }
+
+        private static AppSettings LoadFromPath(string path)
+        {
+            AppSettings settings;
+            SettingsFileResult primaryResult = TryLoadFile(path, out settings);
+            if (primaryResult == SettingsFileResult.Loaded || primaryResult == SettingsFileResult.NewerVersion)
             {
-                string path = GetSettingsPath();
-                if (File.Exists(path))
-                {
-                    string json = File.ReadAllText(path);
-                    bool legacySettings = json.IndexOf("\"SettingsVersion\"", StringComparison.OrdinalIgnoreCase) < 0;
-                    AppSettings settings = new JavaScriptSerializer().Deserialize<AppSettings>(json);
-                    if (settings != null)
-                    {
-                        settings.Normalize();
-                        if (legacySettings && string.Equals(settings.Theme, ThemeDark, StringComparison.OrdinalIgnoreCase))
-                        {
-                            settings.Theme = ThemeSystem;
-                        }
-                        settings.SettingsVersion = CurrentSettingsVersion;
-                        return settings;
-                    }
-                }
+                return settings;
             }
-            catch
+
+            string backupPath = GetBackupPath(path);
+            SettingsFileResult backupResult = TryLoadFile(backupPath, out settings);
+            if (backupResult == SettingsFileResult.Loaded || backupResult == SettingsFileResult.NewerVersion)
             {
+                return settings;
             }
 
             return new AppSettings();
@@ -95,15 +145,229 @@ namespace CodexUsageTray
 
         public void Save()
         {
-            string path = GetSettingsPath();
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
-            SettingsVersion = CurrentSettingsVersion;
-            File.WriteAllText(path, new JavaScriptSerializer().Serialize(this));
+            SaveToPath(GetSettingsPath());
         }
 
-        private void Normalize()
+        private void SaveToPath(string path)
+        {
+            EnsureSaveDoesNotOverwriteNewerSettings(path);
+
+            string directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrEmpty(directory))
+            {
+                throw new InvalidOperationException("Could not determine the settings folder.");
+            }
+
+            Directory.CreateDirectory(directory);
+            SettingsVersion = CurrentSettingsVersion;
+            string json = new JavaScriptSerializer().Serialize(this);
+            string tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+
+            try
+            {
+                WriteTempFile(tempPath, json);
+                if (File.Exists(path))
+                {
+                    File.Replace(tempPath, path, GetBackupPath(path), true);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+        }
+
+        private static SettingsFileResult TryLoadFile(string path, out AppSettings settings)
+        {
+            settings = null;
+            if (!File.Exists(path))
+            {
+                return SettingsFileResult.Missing;
+            }
+
+            try
+            {
+                string json = File.ReadAllText(path);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                object rawSettings = serializer.DeserializeObject(json);
+                IDictionary<string, object> values = rawSettings as IDictionary<string, object>;
+                if (values == null)
+                {
+                    return SettingsFileResult.Invalid;
+                }
+
+                int sourceVersion;
+                bool hasVersion = TryGetSettingsVersion(values, out sourceVersion);
+                if (!hasVersion)
+                {
+                    sourceVersion = 0;
+                }
+
+                if (sourceVersion > CurrentSettingsVersion)
+                {
+                    try
+                    {
+                        settings = serializer.Deserialize<AppSettings>(json);
+                    }
+                    catch
+                    {
+                        settings = null;
+                    }
+
+                    if (settings == null)
+                    {
+                        settings = new AppSettings();
+                    }
+                    settings.Normalize(sourceVersion);
+                    settings.SettingsVersion = sourceVersion;
+                    settings.saveBlockedByNewerVersion = true;
+                    settings.protectedSettingsVersion = sourceVersion;
+                    settings.protectedSettingsPath = path;
+                    return SettingsFileResult.NewerVersion;
+                }
+
+                settings = serializer.Deserialize<AppSettings>(json);
+                if (settings == null)
+                {
+                    return SettingsFileResult.Invalid;
+                }
+
+                settings.Normalize(sourceVersion);
+                if (!hasVersion && string.Equals(settings.Theme, ThemeDark, StringComparison.OrdinalIgnoreCase))
+                {
+                    settings.Theme = ThemeSystem;
+                }
+                settings.SettingsVersion = CurrentSettingsVersion;
+                return SettingsFileResult.Loaded;
+            }
+            catch
+            {
+                settings = null;
+                return SettingsFileResult.Invalid;
+            }
+        }
+
+        private void EnsureSaveDoesNotOverwriteNewerSettings(string path)
+        {
+            if (saveBlockedByNewerVersion)
+            {
+                throw new InvalidOperationException(SaveBlockedMessage);
+            }
+
+            int version;
+            if (TryReadSettingsVersion(path, out version) && version > CurrentSettingsVersion)
+            {
+                throw new InvalidOperationException(BuildNewerVersionMessage(version, path));
+            }
+
+            string backupPath = GetBackupPath(path);
+            if (TryReadSettingsVersion(backupPath, out version) && version > CurrentSettingsVersion)
+            {
+                throw new InvalidOperationException(BuildNewerVersionMessage(version, backupPath));
+            }
+        }
+
+        private static bool TryReadSettingsVersion(string path, out int version)
+        {
+            version = 0;
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                object rawSettings = serializer.DeserializeObject(File.ReadAllText(path));
+                IDictionary<string, object> values = rawSettings as IDictionary<string, object>;
+                return values != null && TryGetSettingsVersion(values, out version);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryGetSettingsVersion(IDictionary<string, object> values, out int version)
+        {
+            version = 0;
+            object rawVersion;
+            if (!TryGetValueIgnoreCase(values, "SettingsVersion", out rawVersion) || rawVersion == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                version = Convert.ToInt32(rawVersion);
+                return version >= 0;
+            }
+            catch
+            {
+                version = 0;
+                return false;
+            }
+        }
+
+        private static bool TryGetValueIgnoreCase(
+            IDictionary<string, object> values,
+            string name,
+            out object value)
+        {
+            foreach (KeyValuePair<string, object> item in values)
+            {
+                if (string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = item.Value;
+                    return true;
+                }
+            }
+
+            value = null;
+            return false;
+        }
+
+        private static void WriteTempFile(string path, string contents)
+        {
+            byte[] data = new UTF8Encoding(false).GetBytes(contents);
+            using (FileStream stream = new FileStream(
+                path,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4096,
+                FileOptions.WriteThrough))
+            {
+                stream.Write(data, 0, data.Length);
+                stream.Flush(true);
+            }
+        }
+
+        private static string BuildNewerVersionMessage(int version, string path)
+        {
+            return "Settings were created by a newer app version (schema "
+                + version.ToString()
+                + "). This version supports schema "
+                + CurrentSettingsVersion.ToString()
+                + " and will not overwrite the file: "
+                + path;
+        }
+
+        private void Normalize(int sourceVersion)
         {
             OverlayNumber = true;
+            if (sourceVersion < 6)
+            {
+                ShowAdditionalLimits = true;
+                ShowResetAvailability = true;
+            }
             if (CriticalThreshold < 1 || CriticalThreshold > 99)
             {
                 CriticalThreshold = 15;
@@ -238,6 +502,11 @@ namespace CodexUsageTray
             }
 
             return false;
+        }
+
+        private static string GetBackupPath(string settingsPath)
+        {
+            return settingsPath + ".bak";
         }
 
         private static string GetSettingsPath()

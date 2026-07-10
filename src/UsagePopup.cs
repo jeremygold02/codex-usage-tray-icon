@@ -1,27 +1,41 @@
 using System;
-using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Web.Script.Serialization;
+using System.Globalization;
 using System.Windows.Forms;
 
 namespace CodexUsageTray
 {
     internal sealed class UsagePopup : Form
     {
+        private const int WmDpiChanged = 0x02E0;
+        private const int LogicalWidth = 390;
+        private const int LogicalBaseHeight = 184;
+        private const int LogicalFooterLineHeight = 18;
+        private const int LogicalFooterContentTop = 182;
+        private const int LogicalDetailsButtonHeight = 22;
+        private const int LogicalFooterBottomPadding = 5;
+        private const string RefreshGlyph = "\uE72C";
+
+        private readonly Button refreshButton;
+        private readonly Button settingsButton;
+        private readonly Button detailsButton;
+        private readonly ToolTip actionToolTip;
+        private readonly Timer refreshAnimationTimer;
+        private readonly Font titleFont;
+        private readonly Font rowLabelFont;
+        private readonly Font percentFont;
+        private readonly Font detailFont;
+        private readonly Font detailHeadingFont;
+        private readonly Font glyphFont;
+
         private AppSettings settings;
         private UsageSnapshot snapshot;
-        private Rectangle refreshBounds;
-        private Rectangle settingsBounds;
-        private bool refreshHover;
-        private bool settingsHover;
+        private int currentDpi = 96;
+        private int refreshAnimationAngle = -90;
+        private bool refreshing;
+        private bool detailsExpanded;
+        private bool updatingLayout;
 
         public event EventHandler RefreshRequested;
         public event EventHandler SettingsRequested;
@@ -29,57 +43,146 @@ namespace CodexUsageTray
         public UsagePopup(AppSettings settings)
         {
             this.settings = settings;
+
+            titleFont = new Font("Segoe UI", 10.0f, FontStyle.Bold, GraphicsUnit.Point);
+            rowLabelFont = new Font("Segoe UI", 9.0f, FontStyle.Regular, GraphicsUnit.Point);
+            percentFont = new Font("Segoe UI", 8.0f, FontStyle.Bold, GraphicsUnit.Point);
+            detailFont = new Font("Segoe UI", 8.0f, FontStyle.Regular, GraphicsUnit.Point);
+            detailHeadingFont = new Font("Segoe UI", 8.0f, FontStyle.Bold, GraphicsUnit.Point);
+            glyphFont = new Font("Segoe MDL2 Assets", 10.0f, FontStyle.Regular, GraphicsUnit.Point);
+
+            refreshAnimationTimer = new Timer();
+            refreshAnimationTimer.Interval = 75;
+            refreshAnimationTimer.Tick += RefreshAnimationTimer_Tick;
+
             Text = "Codex Usage";
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(390, 184);
-            ApplyThemeColors();
+            AutoScaleDimensions = new SizeF(96.0f, 96.0f);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            KeyPreview = true;
             DoubleBuffered = true;
             Padding = new Padding(0);
-            UpdateRegion();
+
+            refreshButton = CreateActionButton("refreshButton", RefreshGlyph, "Refresh usage", 0);
+            settingsButton = CreateActionButton("settingsButton", "\uE713", "Open settings", 1);
+            detailsButton = CreateDetailsButton();
+            refreshButton.Click += RefreshButton_Click;
+            refreshButton.Paint += RefreshButton_Paint;
+            settingsButton.Click += SettingsButton_Click;
+            detailsButton.Click += DetailsButton_Click;
+            detailsButton.Paint += DetailsButton_Paint;
+            Controls.Add(refreshButton);
+            Controls.Add(settingsButton);
+            Controls.Add(detailsButton);
+
+            actionToolTip = new ToolTip();
+            actionToolTip.AutomaticDelay = 350;
+            actionToolTip.AutoPopDelay = 5000;
+            actionToolTip.ShowAlways = true;
+            actionToolTip.SetToolTip(refreshButton, "Refresh usage");
+            actionToolTip.SetToolTip(settingsButton, "Open settings");
+            actionToolTip.SetToolTip(detailsButton, "Show limit details");
+
+            ApplyThemeColors();
+            UpdateActionButtonState();
+            UpdateLayoutMetrics(false);
         }
 
         public void ApplySettings(AppSettings value)
         {
             settings = value;
             ApplyThemeColors();
-            Invalidate();
+            UpdateLayoutMetrics(true);
+            Invalidate(true);
         }
 
         public void UpdateSnapshot(UsageSnapshot value)
         {
             snapshot = value;
-            Invalidate();
+            UpdateActionButtonState();
+            UpdateLayoutMetrics(true);
+            Invalidate(true);
+        }
+
+        public void SetRefreshing(bool value)
+        {
+            if (refreshing == value)
+            {
+                return;
+            }
+
+            refreshing = value;
+            UpdateActionButtonState();
+            UpdateLayoutMetrics(true);
+            Invalidate(true);
         }
 
         public void ShowNear(Point cursor)
         {
+            detailsExpanded = false;
+            UpdateLayoutMetrics(false);
+
             Rectangle area = Screen.FromPoint(cursor).WorkingArea;
-            int x = cursor.X - Width + 28;
-            int y = cursor.Y - Height - 18;
+            int x = cursor.X - Width + ScaleMetric(28);
+            int y = cursor.Y - Height - ScaleMetric(18);
+            int edgeMargin = ScaleMetric(8);
 
             if (x < area.Left)
             {
-                x = area.Left + 8;
+                x = area.Left + edgeMargin;
             }
             if (y < area.Top)
             {
-                y = cursor.Y + 18;
+                y = cursor.Y + ScaleMetric(18);
             }
             if (x + Width > area.Right)
             {
-                x = area.Right - Width - 8;
+                x = area.Right - Width - edgeMargin;
             }
             if (y + Height > area.Bottom)
             {
-                y = area.Bottom - Height - 8;
+                y = area.Bottom - Height - edgeMargin;
             }
 
             Location = new Point(x, y);
             Show();
             Activate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                refreshAnimationTimer.Dispose();
+                actionToolTip.Dispose();
+                titleFont.Dispose();
+                rowLabelFont.Dispose();
+                percentFont.Dispose();
+                detailFont.Dispose();
+                detailHeadingFont.Dispose();
+                glyphFont.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+
+            using (Graphics graphics = CreateGraphics())
+            {
+                int dpi = (int)Math.Round(graphics.DpiX);
+                if (dpi > 0)
+                {
+                    currentDpi = dpi;
+                }
+            }
+
+            UpdateLayoutMetrics(false);
         }
 
         protected override void OnDeactivate(EventArgs e)
@@ -88,57 +191,27 @@ namespace CodexUsageTray
             Hide();
         }
 
-        protected override void OnMouseDown(MouseEventArgs e)
+        protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            base.OnMouseDown(e);
-            if (refreshBounds.Contains(e.Location))
+            if (e.CloseReason == CloseReason.UserClosing)
             {
-                if (RefreshRequested != null)
-                {
-                    RefreshRequested(this, EventArgs.Empty);
-                }
+                e.Cancel = true;
+                Hide();
+                return;
             }
-            else if (settingsBounds.Contains(e.Location))
-            {
-                if (SettingsRequested != null)
-                {
-                    SettingsRequested(this, EventArgs.Empty);
-                }
-            }
+
+            base.OnFormClosing(e);
         }
 
-        protected override void OnMouseMove(MouseEventArgs e)
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            base.OnMouseMove(e);
-            bool refreshIsHover = refreshBounds.Contains(e.Location);
-            bool settingsIsHover = settingsBounds.Contains(e.Location);
-            Cursor = refreshIsHover || settingsIsHover ? Cursors.Hand : Cursors.Default;
-            if (refreshHover != refreshIsHover)
+            if (keyData == Keys.Escape)
             {
-                refreshHover = refreshIsHover;
-                Invalidate(refreshBounds);
+                Hide();
+                return true;
             }
-            if (settingsHover != settingsIsHover)
-            {
-                settingsHover = settingsIsHover;
-                Invalidate(settingsBounds);
-            }
-        }
 
-        protected override void OnMouseLeave(EventArgs e)
-        {
-            base.OnMouseLeave(e);
-            Cursor = Cursors.Default;
-            if (refreshHover)
-            {
-                refreshHover = false;
-                Invalidate(refreshBounds);
-            }
-            if (settingsHover)
-            {
-                settingsHover = false;
-                Invalidate(settingsBounds);
-            }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
 
         protected override void OnResize(EventArgs e)
@@ -147,236 +220,985 @@ namespace CodexUsageTray
             UpdateRegion();
         }
 
+        protected override void OnSystemColorsChanged(EventArgs e)
+        {
+            base.OnSystemColorsChanged(e);
+            ApplyThemeColors();
+            Invalidate(true);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            bool dpiChanged = false;
+            if (m.Msg == WmDpiChanged)
+            {
+                int dpi = (int)(m.WParam.ToInt64() & 0xFFFF);
+                if (dpi > 0 && dpi != currentDpi)
+                {
+                    currentDpi = dpi;
+                    dpiChanged = true;
+                }
+            }
+
+            base.WndProc(ref m);
+
+            if (dpiChanged)
+            {
+                UpdateLayoutMetrics(true);
+                Invalidate(true);
+            }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
 
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.CompositingQuality = CompositingQuality.HighQuality;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            Graphics graphics = e.Graphics;
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            graphics.CompositingQuality = CompositingQuality.HighQuality;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
             bool dark = IsDarkTheme();
-            Color backColor = PopupBackColor(dark);
-            Color foreColor = dark ? Color.White : Color.Black;
-            Color mutedColor = dark ? Color.Gainsboro : Color.FromArgb(72, 72, 72);
-            Color borderColor = dark ? Color.FromArgb(72, 72, 72) : Color.FromArgb(185, 185, 185);
-            if (BackColor != backColor)
+            Color backColor = GetBackColor(dark);
+            Color textColor = GetTextColor(dark);
+            Color mutedColor = GetMutedColor(dark);
+            Color borderColor = GetBorderColor(dark);
+
+            graphics.Clear(backColor);
+
+            using (Pen borderPen = new Pen(borderColor, Math.Max(1.0f, currentDpi / 96.0f)))
             {
-                BackColor = backColor;
+                graphics.DrawRectangle(borderPen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+                graphics.DrawLine(
+                    borderPen,
+                    ScaleMetric(10),
+                    ScaleMetric(38),
+                    ClientSize.Width - ScaleMetric(10),
+                    ScaleMetric(38));
             }
-            ForeColor = foreColor;
-            g.Clear(backColor);
 
-            using (Font titleFont = new Font("Segoe UI", 10, FontStyle.Regular))
-            using (Font labelFont = new Font("Segoe UI", 9, FontStyle.Regular))
-            using (Font smallFont = new Font("Segoe UI", 8, FontStyle.Regular))
-            using (Brush textBrush = new SolidBrush(foreColor))
-            using (Brush mutedBrush = new SolidBrush(mutedColor))
-            using (Pen borderPen = new Pen(borderColor))
+            DrawHeader(graphics, textColor, mutedColor);
+
+            DateTime lastUpdated = snapshot != null ? snapshot.LastUpdated : DateTime.MinValue;
+            DrawUsageRow(
+                graphics,
+                "Weekly",
+                snapshot != null ? snapshot.Weekly : null,
+                lastUpdated,
+                ScaleMetric(14),
+                ScaleMetric(43),
+                textColor,
+                mutedColor);
+            DrawUsageRow(
+                graphics,
+                "5-hour",
+                snapshot != null ? snapshot.FiveHour : null,
+                lastUpdated,
+                ScaleMetric(14),
+                ScaleMetric(110),
+                textColor,
+                mutedColor);
+
+            if (!string.IsNullOrEmpty(BuildStatusLine()) || HasExpandableDetails())
             {
-                g.DrawRectangle(borderPen, 0, 0, Width - 1, Height - 1);
-                g.DrawString("Codex Usage", titleFont, textBrush, 14, 11);
-                DrawActionGlyphs(g, mutedBrush);
-
-                if (snapshot == null)
-                {
-                    g.DrawString("Checking limits...", labelFont, mutedBrush, 14, 46);
-                    return;
-                }
-
-                if (!string.IsNullOrEmpty(snapshot.ErrorMessage))
-                {
-                    g.DrawString(snapshot.ErrorMessage, labelFont, mutedBrush, new RectangleF(14, 44, Width - 28, 58));
-                    g.DrawString("Open settings from the gear.", smallFont, mutedBrush, 14, 120);
-                    return;
-                }
-
-                DrawUsageRow(g, "Weekly", snapshot.Weekly, snapshot.LastUpdated, 10, 42);
-                DrawUsageRow(g, "5h Window", snapshot.FiveHour, snapshot.LastUpdated, 10, 110);
+                DrawFooter(graphics, textColor, mutedColor, borderColor, dark);
             }
         }
 
-        private void DrawUsageRow(Graphics g, string label, LimitWindow window, DateTime lastUpdated, int x, int y)
+        private Button CreateActionButton(string name, string glyph, string accessibleName, int tabIndex)
         {
-            using (Font labelFont = new Font("Segoe UI", 9, FontStyle.Regular))
-            using (Font percentFont = new Font("Segoe UI", 8, FontStyle.Bold))
-            using (Font smallFont = new Font("Segoe UI", 8, FontStyle.Regular))
+            Button button = new Button();
+            button.Name = name;
+            button.Text = glyph;
+            button.Font = glyphFont;
+            button.AccessibleName = accessibleName;
+            button.AccessibleDescription = accessibleName;
+            button.AccessibleRole = AccessibleRole.PushButton;
+            button.TabIndex = tabIndex;
+            button.TabStop = true;
+            button.AutoSize = false;
+            button.Margin = new Padding(0);
+            button.Padding = new Padding(0);
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 0;
+            button.UseVisualStyleBackColor = false;
+            button.UseCompatibleTextRendering = false;
+            button.TextAlign = ContentAlignment.MiddleCenter;
+            button.Cursor = Cursors.Hand;
+            return button;
+        }
+
+        private Button CreateDetailsButton()
+        {
+            Button button = new Button();
+            button.Name = "detailsButton";
+            button.Text = "Details";
+            button.Font = detailFont;
+            button.AccessibleName = "Show limit details";
+            button.AccessibleDescription = "Show available limit reset expirations";
+            button.AccessibleRole = AccessibleRole.PushButton;
+            button.TabIndex = 2;
+            button.TabStop = true;
+            button.AutoSize = false;
+            button.Margin = new Padding(0);
+            button.Padding = new Padding(4, 0, 24, 0);
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 0;
+            button.UseVisualStyleBackColor = false;
+            button.UseCompatibleTextRendering = false;
+            button.TextAlign = ContentAlignment.MiddleLeft;
+            button.Cursor = Cursors.Hand;
+            button.Visible = false;
+            return button;
+        }
+
+        private void RefreshButton_Click(object sender, EventArgs e)
+        {
+            if (IsRefreshActive())
             {
-                bool dark = IsDarkTheme();
-                using (Brush textBrush = new SolidBrush(dark ? Color.White : Color.Black))
-                using (Brush mutedBrush = new SolidBrush(dark ? Color.Gainsboro : Color.FromArgb(72, 72, 72)))
-                using (Brush trackBrush = new SolidBrush(dark ? Color.FromArgb(22, 22, 22) : Color.FromArgb(210, 210, 210)))
+                return;
+            }
+
+            EventHandler handler = RefreshRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        private void RefreshAnimationTimer_Tick(object sender, EventArgs e)
+        {
+            refreshAnimationAngle = (refreshAnimationAngle + 30) % 360;
+            refreshButton.Invalidate();
+        }
+
+        private void RefreshButton_Paint(object sender, PaintEventArgs e)
+        {
+            if (!IsRefreshActive())
+            {
+                return;
+            }
+
+            float scale = currentDpi / 96.0f;
+            float diameter = 14.0f * scale;
+            float penWidth = Math.Max(1.5f, 1.8f * scale);
+            RectangleF bounds = new RectangleF(
+                (refreshButton.ClientSize.Width - diameter) / 2.0f,
+                (refreshButton.ClientSize.Height - diameter) / 2.0f,
+                diameter,
+                diameter);
+            Color spinnerColor = SystemInformation.HighContrast
+                ? SystemColors.ControlText
+                : refreshButton.ForeColor;
+
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            using (Pen pen = new Pen(spinnerColor, penWidth))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                e.Graphics.DrawArc(pen, bounds, refreshAnimationAngle, 265);
+            }
+        }
+
+        private void SettingsButton_Click(object sender, EventArgs e)
+        {
+            EventHandler handler = SettingsRequested;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        private void DetailsButton_Click(object sender, EventArgs e)
+        {
+            if (!HasExpandableDetails())
+            {
+                return;
+            }
+
+            detailsExpanded = !detailsExpanded;
+            UpdateLayoutMetrics(true);
+            Invalidate(true);
+        }
+
+        private void DetailsButton_Paint(object sender, PaintEventArgs e)
+        {
+            string glyph = detailsExpanded ? "\uE70E" : "\uE70D";
+            Rectangle glyphBounds = new Rectangle(
+                detailsButton.ClientSize.Width - ScaleMetric(24),
+                0,
+                ScaleMetric(20),
+                detailsButton.ClientSize.Height);
+            TextRenderer.DrawText(
+                e.Graphics,
+                glyph,
+                glyphFont,
+                glyphBounds,
+                detailsButton.ForeColor,
+                TextFormatFlags.SingleLine |
+                    TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.HorizontalCenter |
+                    TextFormatFlags.NoPadding);
+        }
+
+        private void DrawHeader(Graphics graphics, Color textColor, Color mutedColor)
+        {
+            int left = ScaleMetric(14);
+            int top = ScaleMetric(9);
+            int right = refreshButton.Left - ScaleMetric(8);
+            int height = ScaleMetric(22);
+            Rectangle titleBounds = new Rectangle(left, top, Math.Max(0, right - left), height);
+            TextFormatFlags flags = TextFormatFlags.SingleLine |
+                TextFormatFlags.VerticalCenter |
+                TextFormatFlags.NoPrefix |
+                TextFormatFlags.NoPadding;
+
+            const string title = "Codex Usage";
+            Size titleSize = TextRenderer.MeasureText(
+                graphics,
+                title,
+                titleFont,
+                new Size(32767, height),
+                flags);
+            Rectangle titleTextBounds = new Rectangle(
+                titleBounds.Left,
+                titleBounds.Top,
+                Math.Min(titleBounds.Width, titleSize.Width),
+                titleBounds.Height);
+            TextRenderer.DrawText(graphics, title, titleFont, titleTextBounds, textColor, flags);
+
+            string headerDetail = FormatPlanType(snapshot != null ? snapshot.PlanType : null);
+            if ((settings == null || settings.ShowPopupLastUpdated) &&
+                snapshot != null && snapshot.LastUpdated != DateTime.MinValue)
+            {
+                string updated = "Updated " + TimeFormatter.FormatClock(snapshot.LastUpdated);
+                headerDetail = string.IsNullOrEmpty(headerDetail)
+                    ? updated
+                    : headerDetail + "  |  " + updated;
+            }
+
+            if (!string.IsNullOrEmpty(headerDetail))
+            {
+                int planLeft = titleTextBounds.Right + ScaleMetric(8);
+                Rectangle planBounds = new Rectangle(
+                    planLeft,
+                    top,
+                    Math.Max(0, right - planLeft),
+                    height);
+                TextRenderer.DrawText(
+                    graphics,
+                    headerDetail,
+                    detailFont,
+                    planBounds,
+                    mutedColor,
+                    flags | TextFormatFlags.EndEllipsis);
+            }
+        }
+
+        private void DrawUsageRow(
+            Graphics graphics,
+            string label,
+            LimitWindow window,
+            DateTime lastUpdated,
+            int x,
+            int y,
+            Color textColor,
+            Color mutedColor)
+        {
+            int width = ClientSize.Width - x - ScaleMetric(14);
+            Rectangle labelBounds = new Rectangle(x, y, width, ScaleMetric(18));
+            TextFormatFlags singleLine = TextFormatFlags.SingleLine |
+                TextFormatFlags.VerticalCenter |
+                TextFormatFlags.NoPrefix |
+                TextFormatFlags.NoPadding;
+            TextRenderer.DrawText(graphics, label, rowLabelFont, labelBounds, textColor, singleLine);
+
+            Rectangle barBounds = new Rectangle(x, y + ScaleMetric(20), width, ScaleMetric(20));
+            bool dark = IsDarkTheme();
+            Color trackColor = GetTrackColor(dark);
+            using (Brush trackBrush = new SolidBrush(trackColor))
+            {
+                graphics.FillRectangle(trackBrush, barBounds);
+            }
+
+            if (window == null)
+            {
+                TextRenderer.DrawText(
+                    graphics,
+                    "unknown",
+                    detailFont,
+                    barBounds,
+                    mutedColor,
+                    singleLine | TextFormatFlags.HorizontalCenter);
+            }
+            else
+            {
+                int remaining = window.RemainingPercent;
+                int fillWidth = (int)Math.Round(barBounds.Width * (remaining / 100.0));
+                if (fillWidth < 0)
                 {
-                int remaining = window != null ? window.RemainingPercent : 0;
-
-                int textX = x + 14;
-                g.DrawString(label, labelFont, textBrush, textX, y);
-
-                Rectangle bar = new Rectangle(textX, y + 21, Width - textX - 14, 20);
-                g.FillRectangle(trackBrush, bar);
-
-                if (window == null)
+                    fillWidth = 0;
+                }
+                if (fillWidth > barBounds.Width)
                 {
-                    g.DrawString("unknown", smallFont, mutedBrush, bar.X + 6, bar.Y + 3);
-                    return;
+                    fillWidth = barBounds.Width;
                 }
 
-                Rectangle fill = new Rectangle(bar.X, bar.Y, (int)Math.Round(bar.Width * (remaining / 100.0)), bar.Height);
-                using (Brush fillBrush = new SolidBrush(settings.ColorBars ? IconRenderer.ColorForPercent(remaining, settings) : Color.FromArgb(118, 118, 118)))
+                Color fillColor = GetBarColor(remaining, dark);
+                if (fillWidth > 0)
                 {
-                    g.FillRectangle(fillBrush, fill);
+                    using (Brush fillBrush = new SolidBrush(fillColor))
+                    {
+                        graphics.FillRectangle(
+                            fillBrush,
+                            new Rectangle(barBounds.X, barBounds.Y, fillWidth, barBounds.Height));
+                    }
                 }
 
-                DrawCenteredText(g, remaining + "%", percentFont, textBrush, bar);
+                Color percentBackground = fillWidth >= (barBounds.Width / 2) ? fillColor : trackColor;
+                Color percentColor = GetContrastingTextColor(percentBackground);
+                if (SystemInformation.HighContrast)
+                {
+                    percentColor = fillWidth >= (barBounds.Width / 2)
+                        ? SystemColors.HighlightText
+                        : SystemColors.WindowText;
+                }
+                TextRenderer.DrawText(
+                    graphics,
+                    remaining.ToString(CultureInfo.CurrentCulture) + "%",
+                    percentFont,
+                    barBounds,
+                    percentColor,
+                    singleLine | TextFormatFlags.HorizontalCenter);
+            }
 
-                string leftDetail = settings == null || settings.ShowPopupLastUpdated
-                    ? "Updated: " + TimeFormatter.FormatClock(lastUpdated)
-                    : "";
-                string reset = window.ResetAfterSeconds.HasValue
+            string rightDetail = "";
+            if (settings == null || settings.ShowPopupResetTimes)
+            {
+                rightDetail = window != null && window.ResetAfterSeconds.HasValue
                     ? "Next reset: " + TimeFormatter.FormatResetDateTime(lastUpdated, window.ResetAfterSeconds.Value) +
                         " (" + TimeFormatter.FormatDuration(window.ResetAfterSeconds.Value) + ")"
                     : "Next reset: ?";
-                string rightDetail = settings == null || settings.ShowPopupResetTimes ? reset : "";
+            }
 
-                if (!string.IsNullOrEmpty(leftDetail))
+            Rectangle detailBounds = new Rectangle(
+                x,
+                y + ScaleMetric(43),
+                width,
+                ScaleMetric(17));
+            DrawMeasuredDetails(
+                graphics,
+                "",
+                rightDetail,
+                detailBounds,
+                mutedColor);
+        }
+
+        private void DrawMeasuredDetails(
+            Graphics graphics,
+            string leftText,
+            string rightText,
+            Rectangle bounds,
+            Color color)
+        {
+            TextFormatFlags measureFlags = TextFormatFlags.SingleLine |
+                TextFormatFlags.NoPrefix |
+                TextFormatFlags.NoPadding;
+            TextFormatFlags drawFlags = measureFlags |
+                TextFormatFlags.VerticalCenter |
+                TextFormatFlags.EndEllipsis;
+
+            if (string.IsNullOrEmpty(leftText))
+            {
+                if (!string.IsNullOrEmpty(rightText))
                 {
-                    g.DrawString(leftDetail, smallFont, mutedBrush, textX, y + 44);
+                    TextRenderer.DrawText(
+                        graphics,
+                        rightText,
+                        detailFont,
+                        bounds,
+                        color,
+                        drawFlags | TextFormatFlags.Right);
                 }
-                if (!string.IsNullOrEmpty(rightDetail))
+                return;
+            }
+
+            if (string.IsNullOrEmpty(rightText))
+            {
+                TextRenderer.DrawText(graphics, leftText, detailFont, bounds, color, drawFlags);
+                return;
+            }
+
+            Size leftSize = TextRenderer.MeasureText(
+                graphics,
+                leftText,
+                detailFont,
+                new Size(32767, bounds.Height),
+                measureFlags);
+            Size rightSize = TextRenderer.MeasureText(
+                graphics,
+                rightText,
+                detailFont,
+                new Size(32767, bounds.Height),
+                measureFlags);
+            int gap = ScaleMetric(12);
+
+            if (leftSize.Width + gap + rightSize.Width <= bounds.Width)
+            {
+                Rectangle leftBounds = new Rectangle(bounds.X, bounds.Y, leftSize.Width, bounds.Height);
+                Rectangle rightBounds = new Rectangle(
+                    bounds.Right - rightSize.Width,
+                    bounds.Y,
+                    rightSize.Width,
+                    bounds.Height);
+                TextRenderer.DrawText(graphics, leftText, detailFont, leftBounds, color, drawFlags);
+                TextRenderer.DrawText(
+                    graphics,
+                    rightText,
+                    detailFont,
+                    rightBounds,
+                    color,
+                    drawFlags | TextFormatFlags.Right);
+                return;
+            }
+
+            int availableWidth = Math.Max(0, bounds.Width - gap);
+            int leftWidth = Math.Min(leftSize.Width, availableWidth / 3);
+            int minimumLeftWidth = Math.Min(ScaleMetric(76), availableWidth);
+            if (leftWidth < minimumLeftWidth)
+            {
+                leftWidth = minimumLeftWidth;
+            }
+            int rightWidth = Math.Max(0, availableWidth - leftWidth);
+
+            Rectangle constrainedLeft = new Rectangle(bounds.X, bounds.Y, leftWidth, bounds.Height);
+            Rectangle constrainedRight = new Rectangle(
+                constrainedLeft.Right + gap,
+                bounds.Y,
+                rightWidth,
+                bounds.Height);
+            TextRenderer.DrawText(graphics, leftText, detailFont, constrainedLeft, color, drawFlags);
+            TextRenderer.DrawText(
+                graphics,
+                rightText,
+                detailFont,
+                constrainedRight,
+                color,
+                drawFlags | TextFormatFlags.Right);
+        }
+
+        private void DrawFooter(
+            Graphics graphics,
+            Color textColor,
+            Color mutedColor,
+            Color borderColor,
+            bool dark)
+        {
+            int dividerY = ScaleMetric(176);
+            using (Pen dividerPen = new Pen(borderColor, Math.Max(1.0f, currentDpi / 96.0f)))
+            {
+                graphics.DrawLine(
+                    dividerPen,
+                    ScaleMetric(10),
+                    dividerY,
+                    ClientSize.Width - ScaleMetric(10),
+                    dividerY);
+            }
+
+            int y = ScaleMetric(LogicalFooterContentTop);
+            TextFormatFlags flags = TextFormatFlags.SingleLine |
+                TextFormatFlags.VerticalCenter |
+                TextFormatFlags.EndEllipsis |
+                TextFormatFlags.NoPrefix |
+                TextFormatFlags.NoPadding;
+
+            string statusLine = BuildStatusLine();
+            if (!string.IsNullOrEmpty(statusLine))
+            {
+                Rectangle statusBounds = new Rectangle(
+                    ScaleMetric(14),
+                    y,
+                    ClientSize.Width - ScaleMetric(28),
+                    ScaleMetric(17));
+                TextRenderer.DrawText(
+                    graphics,
+                    statusLine,
+                    detailFont,
+                    statusBounds,
+                    GetStatusColor(dark),
+                    flags);
+                y += ScaleMetric(LogicalFooterLineHeight);
+            }
+
+            if (detailsButton.Visible && detailsExpanded)
+            {
+                y = detailsButton.Bottom + ScaleMetric(4);
+                DrawExpandedDetails(graphics, y, textColor, mutedColor);
+            }
+        }
+
+        private void DrawExpandedDetails(
+            Graphics graphics,
+            int y,
+            Color textColor,
+            Color mutedColor)
+        {
+            if (ShouldShowResetAvailability() && HasResetInformation())
+            {
+                int knownCount = snapshot.AvailableResets != null
+                    ? snapshot.AvailableResets.Count
+                    : 0;
+                int displayCount = GetResetDisplayCount();
+                string heading = "Limit resets (" +
+                    displayCount.ToString(CultureInfo.CurrentCulture) +
+                    " available)";
+                DrawDetailHeading(graphics, heading, y, textColor);
+                y += ScaleMetric(LogicalFooterLineHeight);
+
+                for (int index = 0; index < knownCount; index++)
                 {
-                    DrawRightAlignedText(g, rightDetail, smallFont, mutedBrush, new RectangleF(textX + 106, y + 44, bar.Right - textX - 106, 16));
+                    RateLimitResetCredit credit = snapshot.AvailableResets[index];
+                    string title = credit != null
+                        ? CompactSingleLine(credit.Title, 42)
+                        : null;
+                    if (string.IsNullOrEmpty(title))
+                    {
+                        title = "Reset";
+                    }
+
+                    string expiration = credit != null && credit.ExpiresAtUtc.HasValue
+                        ? "Expires " + TimeFormatter.FormatDateTime(
+                            credit.ExpiresAtUtc.Value.ToLocalTime())
+                        : "Expiration unavailable";
+                    DrawMeasuredDetails(
+                        graphics,
+                        (index + 1).ToString(CultureInfo.CurrentCulture) + ". " + title,
+                        expiration,
+                        CreateDetailBounds(y),
+                        mutedColor);
+                    y += ScaleMetric(LogicalFooterLineHeight);
                 }
+
+                int unitemizedCount = Math.Max(0, displayCount - knownCount);
+                if (knownCount == 0 || unitemizedCount > 0)
+                {
+                    string label = displayCount == 0
+                        ? "No resets available"
+                        : unitemizedCount.ToString(CultureInfo.CurrentCulture) +
+                            (unitemizedCount == 1 ? " additional reset" : " additional resets");
+                    string detail = displayCount == 0 ? "" : "Expiration unavailable";
+                    DrawMeasuredDetails(
+                        graphics,
+                        label,
+                        detail,
+                        CreateDetailBounds(y),
+                        mutedColor);
                 }
             }
         }
 
-        private void DrawActionGlyphs(Graphics g, Brush brush)
+        private void DrawDetailHeading(Graphics graphics, string text, int y, Color color)
         {
-            refreshBounds = new Rectangle(332, 9, 22, 22);
-            settingsBounds = new Rectangle(360, 9, 22, 22);
-            bool refreshIsHover = refreshHover || refreshBounds.Contains(PointToClient(Cursor.Position));
-            bool settingsIsHover = settingsHover || settingsBounds.Contains(PointToClient(Cursor.Position));
-            bool dark = IsDarkTheme();
+            TextRenderer.DrawText(
+                graphics,
+                string.IsNullOrEmpty(text) ? "Limit details" : text,
+                detailHeadingFont,
+                new Rectangle(
+                    ScaleMetric(14),
+                    y,
+                    ClientSize.Width - ScaleMetric(28),
+                    ScaleMetric(17)),
+                color,
+                TextFormatFlags.SingleLine |
+                    TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.EndEllipsis |
+                    TextFormatFlags.NoPrefix |
+                    TextFormatFlags.NoPadding);
+        }
 
-            if (refreshIsHover)
+        private Rectangle CreateDetailBounds(int y)
+        {
+            int left = ScaleMetric(22);
+            return new Rectangle(
+                left,
+                y,
+                ClientSize.Width - left - ScaleMetric(14),
+                ScaleMetric(17));
+        }
+
+        private bool HasExpandableDetails()
+        {
+            return ShouldShowResetAvailability() && HasResetInformation();
+        }
+
+        private bool ShouldShowResetAvailability()
+        {
+            return settings == null || settings.ShowResetAvailability;
+        }
+
+        private bool HasResetInformation()
+        {
+            return snapshot != null &&
+                (snapshot.AvailableResetCount.HasValue ||
+                    (snapshot.AvailableResets != null && snapshot.AvailableResets.Count > 0));
+        }
+
+        private int GetResetDisplayCount()
+        {
+            if (snapshot == null)
             {
-                using (Brush hoverBrush = new SolidBrush(dark ? Color.FromArgb(92, 92, 92) : Color.FromArgb(220, 220, 220)))
+                return 0;
+            }
+
+            int knownCount = snapshot.AvailableResets != null
+                ? snapshot.AvailableResets.Count
+                : 0;
+            int reportedCount = snapshot.AvailableResetCount.HasValue
+                ? snapshot.AvailableResetCount.Value
+                : 0;
+            return Math.Max(knownCount, Math.Max(0, reportedCount));
+        }
+
+        private int GetExpandedDetailLineCount()
+        {
+            int lineCount = 0;
+            if (ShouldShowResetAvailability() && HasResetInformation())
+            {
+                int knownCount = snapshot.AvailableResets != null
+                    ? snapshot.AvailableResets.Count
+                    : 0;
+                int displayCount = GetResetDisplayCount();
+                lineCount += 1 + knownCount;
+                if (knownCount == 0 || displayCount > knownCount)
                 {
-                    g.FillEllipse(hoverBrush, refreshBounds);
+                    lineCount++;
                 }
             }
-            if (settingsIsHover)
+
+            return lineCount;
+        }
+
+        private string BuildStatusLine()
+        {
+            if (snapshot == null)
             {
-                using (Brush hoverBrush = new SolidBrush(dark ? Color.FromArgb(92, 92, 92) : Color.FromArgb(220, 220, 220)))
-                {
-                    g.FillEllipse(hoverBrush, settingsBounds);
-                }
+                return "Checking limits...";
             }
 
-            Color refreshColor = dark
-                ? (refreshIsHover ? Color.White : Color.FromArgb(220, 220, 220))
-                : (refreshIsHover ? Color.Black : Color.FromArgb(72, 72, 72));
-            Color gearColor = dark
-                ? (settingsIsHover ? Color.White : Color.FromArgb(220, 220, 220))
-                : (settingsIsHover ? Color.Black : Color.FromArgb(72, 72, 72));
-            using (Pen refreshPen = new Pen(refreshColor, 1.4f))
-            using (Pen gearPen = new Pen(gearColor, 1.2f))
+            string providedStatus = CompactSingleLine(snapshot.StatusMessage, 120);
+            bool hasUsage = snapshot.Weekly != null || snapshot.FiveHour != null;
+
+            if (IsRefreshActive())
             {
-                DrawRefreshIcon(g, refreshPen, refreshBounds);
-                DrawSettingsIcon(g, gearPen, settingsBounds);
+                return hasUsage ? null : "Checking limits...";
             }
+
+            if (snapshot.IsPaused)
+            {
+                return !string.IsNullOrEmpty(providedStatus)
+                    ? providedStatus
+                    : BuildShowingStatus("Checks paused", snapshot.LastUpdated);
+            }
+
+            if (!string.IsNullOrEmpty(snapshot.ErrorMessage))
+            {
+                if (!string.IsNullOrEmpty(providedStatus))
+                {
+                    return providedStatus;
+                }
+                return hasUsage
+                    ? BuildShowingStatus("Refresh failed", snapshot.LastUpdated)
+                    : CompactSingleLine(snapshot.ErrorMessage, 120);
+            }
+
+            if (snapshot.IsStale)
+            {
+                return !string.IsNullOrEmpty(providedStatus)
+                    ? providedStatus
+                    : BuildShowingStatus("Usage may be stale", snapshot.LastUpdated);
+            }
+
+            return providedStatus;
+        }
+
+        private static string BuildShowingStatus(string prefix, DateTime lastUpdated)
+        {
+            if (lastUpdated == DateTime.MinValue)
+            {
+                return prefix;
+            }
+
+            return prefix + " - showing " + TimeFormatter.FormatClock(lastUpdated) + " data";
+        }
+
+        private void UpdateLayoutMetrics(bool preserveBottom)
+        {
+            if (updatingLayout)
+            {
+                return;
+            }
+
+            updatingLayout = true;
+            try
+            {
+                int oldBottom = Bottom;
+                bool hasStatus = !string.IsNullOrEmpty(BuildStatusLine());
+                bool hasDetails = HasExpandableDetails();
+                if (!hasDetails)
+                {
+                    detailsExpanded = false;
+                }
+
+                int logicalHeight = LogicalBaseHeight;
+                if (hasStatus || hasDetails)
+                {
+                    logicalHeight = LogicalFooterContentTop;
+                    if (hasStatus)
+                    {
+                        logicalHeight += LogicalFooterLineHeight;
+                    }
+                    if (hasDetails)
+                    {
+                        logicalHeight += LogicalDetailsButtonHeight;
+                        if (detailsExpanded)
+                        {
+                            logicalHeight += 4 +
+                                (GetExpandedDetailLineCount() * LogicalFooterLineHeight);
+                        }
+                    }
+                    logicalHeight += LogicalFooterBottomPadding;
+                }
+                Size desiredSize = new Size(ScaleMetric(LogicalWidth), ScaleMetric(logicalHeight));
+                if (ClientSize != desiredSize)
+                {
+                    ClientSize = desiredSize;
+                }
+
+                LayoutActionButtons();
+                LayoutFooterControls(hasStatus, hasDetails);
+                UpdateRegion();
+
+                if (preserveBottom && Visible)
+                {
+                    Top = oldBottom - Height;
+                    ClampToWorkingArea();
+                }
+            }
+            finally
+            {
+                updatingLayout = false;
+            }
+        }
+
+        private void LayoutActionButtons()
+        {
+            int size = ScaleMetric(30);
+            int top = ScaleMetric(5);
+            int right = ScaleMetric(8);
+            int gap = ScaleMetric(2);
+            settingsButton.Bounds = new Rectangle(ClientSize.Width - right - size, top, size, size);
+            refreshButton.Bounds = new Rectangle(settingsButton.Left - gap - size, top, size, size);
+        }
+
+        private void LayoutFooterControls(bool hasStatus, bool hasDetails)
+        {
+            detailsButton.Visible = hasDetails;
+            if (!hasDetails)
+            {
+                return;
+            }
+
+            int y = LogicalFooterContentTop + (hasStatus ? LogicalFooterLineHeight : 0);
+            detailsButton.Bounds = new Rectangle(
+                ScaleMetric(10),
+                ScaleMetric(y),
+                ClientSize.Width - ScaleMetric(20),
+                ScaleMetric(LogicalDetailsButtonHeight));
+            detailsButton.AccessibleName = detailsExpanded
+                ? "Hide limit details"
+                : "Show limit details";
+            detailsButton.AccessibleDescription = detailsButton.AccessibleName;
+            actionToolTip.SetToolTip(detailsButton, detailsButton.AccessibleName);
+            detailsButton.Invalidate();
+        }
+
+        private void ClampToWorkingArea()
+        {
+            Rectangle area = Screen.FromControl(this).WorkingArea;
+            int margin = ScaleMetric(8);
+            int x = Left;
+            int y = Top;
+
+            if (x < area.Left + margin)
+            {
+                x = area.Left + margin;
+            }
+            if (x + Width > area.Right - margin)
+            {
+                x = area.Right - margin - Width;
+            }
+            if (y < area.Top + margin)
+            {
+                y = area.Top + margin;
+            }
+            if (y + Height > area.Bottom - margin)
+            {
+                y = area.Bottom - margin - Height;
+            }
+
+            Location = new Point(x, y);
+        }
+
+        private void UpdateActionButtonState()
+        {
+            bool active = IsRefreshActive();
+            if (active)
+            {
+                refreshButton.Text = "";
+                if (!refreshAnimationTimer.Enabled)
+                {
+                    refreshAnimationAngle = -90;
+                    refreshAnimationTimer.Start();
+                }
+            }
+            else
+            {
+                refreshAnimationTimer.Stop();
+                refreshAnimationAngle = -90;
+                refreshButton.Text = RefreshGlyph;
+            }
+
+            refreshButton.Enabled = !active;
+            refreshButton.Cursor = active ? Cursors.Default : Cursors.Hand;
+            refreshButton.AccessibleName = active ? "Refreshing usage" : "Refresh usage";
+            refreshButton.AccessibleDescription = refreshButton.AccessibleName;
+            actionToolTip.SetToolTip(refreshButton, active ? "Refreshing usage" : "Refresh usage");
+            refreshButton.Invalidate();
+        }
+
+        private bool IsRefreshActive()
+        {
+            return refreshing || (snapshot != null && snapshot.IsRefreshing);
         }
 
         private void ApplyThemeColors()
         {
             bool dark = IsDarkTheme();
-            BackColor = PopupBackColor(dark);
-            ForeColor = dark ? Color.White : Color.Black;
+            Color backColor = GetBackColor(dark);
+            Color textColor = GetTextColor(dark);
+            Color hoverColor = SystemInformation.HighContrast
+                ? SystemColors.Highlight
+                : (dark ? Color.FromArgb(78, 78, 78) : Color.FromArgb(225, 225, 225));
+            Color pressedColor = SystemInformation.HighContrast
+                ? SystemColors.HotTrack
+                : (dark ? Color.FromArgb(92, 92, 92) : Color.FromArgb(210, 210, 210));
+
+            BackColor = backColor;
+            ForeColor = textColor;
+            ApplyButtonColors(refreshButton, backColor, textColor, hoverColor, pressedColor);
+            ApplyButtonColors(settingsButton, backColor, textColor, hoverColor, pressedColor);
+            ApplyButtonColors(detailsButton, backColor, textColor, hoverColor, pressedColor);
+        }
+
+        private static void ApplyButtonColors(
+            Button button,
+            Color backColor,
+            Color textColor,
+            Color hoverColor,
+            Color pressedColor)
+        {
+            button.BackColor = backColor;
+            button.ForeColor = textColor;
+            button.FlatAppearance.BorderColor = backColor;
+            button.FlatAppearance.MouseOverBackColor = hoverColor;
+            button.FlatAppearance.MouseDownBackColor = pressedColor;
         }
 
         private bool IsDarkTheme()
         {
-            return settings == null || AppSettings.IsDarkTheme(settings.Theme);
+            return !SystemInformation.HighContrast &&
+                (settings == null || AppSettings.IsDarkTheme(settings.Theme));
         }
 
-        private static Color PopupBackColor(bool dark)
+        private Color GetBarColor(int remaining, bool dark)
         {
+            if (SystemInformation.HighContrast)
+            {
+                return SystemColors.Highlight;
+            }
+            if (settings == null || settings.ColorBars)
+            {
+                return IconRenderer.ColorForPercent(remaining, settings);
+            }
+            return dark ? Color.FromArgb(132, 132, 132) : Color.FromArgb(118, 118, 118);
+        }
+
+        private static Color GetBackColor(bool dark)
+        {
+            if (SystemInformation.HighContrast)
+            {
+                return SystemColors.Window;
+            }
             return dark ? Color.FromArgb(54, 54, 54) : Color.FromArgb(245, 245, 245);
         }
 
-        private static void DrawSettingsIcon(Graphics g, Pen pen, Rectangle bounds)
+        private static Color GetTextColor(bool dark)
         {
-            float centerX = bounds.Left + (bounds.Width / 2.0f);
-            float centerY = bounds.Top + (bounds.Height / 2.0f);
-            using (GraphicsPath gearPath = CreateGearPath(centerX, centerY, 7.3f, 5.6f, 8))
+            if (SystemInformation.HighContrast)
             {
-                g.DrawPath(pen, gearPath);
+                return SystemColors.WindowText;
             }
-
-            g.DrawEllipse(pen, centerX - 2.2f, centerY - 2.2f, 4.4f, 4.4f);
+            return dark ? Color.White : Color.Black;
         }
 
-        private static void DrawRefreshIcon(Graphics g, Pen pen, Rectangle bounds)
+        private static Color GetMutedColor(bool dark)
         {
-            RectangleF arcBounds = new RectangleF(bounds.Left + 5.0f, bounds.Top + 5.0f, bounds.Width - 10.0f, bounds.Height - 10.0f);
-            g.DrawArc(pen, arcBounds, 35, 285);
-
-            PointF tip = new PointF(bounds.Right - 5.0f, bounds.Top + 9.0f);
-            PointF wingA = new PointF(tip.X - 4.2f, tip.Y - 0.8f);
-            PointF wingB = new PointF(tip.X - 1.4f, tip.Y + 3.8f);
-            using (Brush brush = new SolidBrush(pen.Color))
+            if (SystemInformation.HighContrast)
             {
-                g.FillPolygon(brush, new PointF[] { tip, wingA, wingB });
+                return SystemColors.GrayText;
             }
+            return dark ? Color.Gainsboro : Color.FromArgb(72, 72, 72);
         }
 
-        private static GraphicsPath CreateGearPath(float centerX, float centerY, float outerRadius, float rootRadius, int teeth)
+        private static Color GetBorderColor(bool dark)
         {
-            GraphicsPath path = new GraphicsPath();
-            List<PointF> points = new List<PointF>();
-            double step = (Math.PI * 2.0) / teeth;
-            for (int tooth = 0; tooth < teeth; tooth++)
+            if (SystemInformation.HighContrast)
             {
-                double centerAngle = (-Math.PI / 2.0) + (tooth * step);
-                points.Add(CreateGearPoint(centerX, centerY, rootRadius, centerAngle - (step * 0.42)));
-                points.Add(CreateGearPoint(centerX, centerY, outerRadius, centerAngle - (step * 0.24)));
-                points.Add(CreateGearPoint(centerX, centerY, outerRadius, centerAngle + (step * 0.24)));
-                points.Add(CreateGearPoint(centerX, centerY, rootRadius, centerAngle + (step * 0.42)));
+                return SystemColors.WindowFrame;
             }
-            if (points.Count > 0)
-            {
-                path.AddPolygon(points.ToArray());
-            }
-            return path;
+            return dark ? Color.FromArgb(82, 82, 82) : Color.FromArgb(185, 185, 185);
         }
 
-        private static PointF CreateGearPoint(float centerX, float centerY, float radius, double angle)
+        private static Color GetTrackColor(bool dark)
         {
-            return new PointF(
-                centerX + (float)(Math.Cos(angle) * radius),
-                centerY + (float)(Math.Sin(angle) * radius));
+            if (SystemInformation.HighContrast)
+            {
+                return SystemColors.ControlDark;
+            }
+            return dark ? Color.FromArgb(22, 22, 22) : Color.FromArgb(210, 210, 210);
         }
 
-
-        private static void DrawCenteredText(Graphics g, string text, Font font, Brush brush, Rectangle bounds)
+        private static Color GetStatusColor(bool dark)
         {
-            using (StringFormat format = new StringFormat())
+            if (SystemInformation.HighContrast)
             {
-                format.Alignment = StringAlignment.Center;
-                format.LineAlignment = StringAlignment.Center;
-                g.DrawString(text, font, brush, bounds, format);
+                return SystemColors.WindowText;
             }
+            return dark ? Color.FromArgb(255, 214, 128) : Color.FromArgb(126, 72, 0);
         }
 
-        private static void DrawRightAlignedText(Graphics g, string text, Font font, Brush brush, RectangleF bounds)
+        private static Color GetContrastingTextColor(Color background)
         {
-            using (StringFormat format = new StringFormat())
-            {
-                format.Alignment = StringAlignment.Far;
-                format.LineAlignment = StringAlignment.Near;
-                g.DrawString(text, font, brush, bounds, format);
-            }
+            double luminance = (background.R * 0.299) +
+                (background.G * 0.587) +
+                (background.B * 0.114);
+            return luminance >= 150.0 ? Color.Black : Color.White;
+        }
+
+        private int ScaleMetric(int logicalPixels)
+        {
+            return (int)Math.Round(logicalPixels * (currentDpi / 96.0));
         }
 
         private void UpdateRegion()
@@ -387,7 +1209,9 @@ namespace CodexUsageTray
             }
 
             Region oldRegion = Region;
-            using (GraphicsPath path = RoundedRectangle(new Rectangle(0, 0, Width, Height), 8))
+            using (GraphicsPath path = RoundedRectangle(
+                new Rectangle(0, 0, Width, Height),
+                ScaleMetric(8)))
             {
                 Region = new Region(path);
             }
@@ -399,8 +1223,14 @@ namespace CodexUsageTray
 
         private static GraphicsPath RoundedRectangle(Rectangle bounds, int radius)
         {
-            int diameter = radius * 2;
             GraphicsPath path = new GraphicsPath();
+            if (radius <= 0)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+
+            int diameter = radius * 2;
             path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
             path.AddArc(bounds.Right - diameter - 1, bounds.Top, diameter, diameter, 270, 90);
             path.AddArc(bounds.Right - diameter - 1, bounds.Bottom - diameter - 1, diameter, diameter, 0, 90);
@@ -408,5 +1238,45 @@ namespace CodexUsageTray
             path.CloseFigure();
             return path;
         }
+
+        private static string FormatPlanType(string planType)
+        {
+            string value = CompactSingleLine(planType, 48);
+            if (string.IsNullOrEmpty(value))
+            {
+                return null;
+            }
+
+            value = value.Replace('_', ' ');
+            if (value.Length > 0)
+            {
+                value = char.ToUpper(value[0], CultureInfo.CurrentCulture) + value.Substring(1);
+            }
+            if (value.IndexOf("plan", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                value += " plan";
+            }
+            return value;
+        }
+
+        private static string CompactSingleLine(string value, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            string compact = value.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ').Trim();
+            while (compact.IndexOf("  ", StringComparison.Ordinal) >= 0)
+            {
+                compact = compact.Replace("  ", " ");
+            }
+            if (compact.Length > maxLength)
+            {
+                compact = compact.Substring(0, Math.Max(0, maxLength - 3)).TrimEnd() + "...";
+            }
+            return compact;
+        }
+
     }
 }
