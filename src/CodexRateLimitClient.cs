@@ -17,6 +17,7 @@ namespace CodexUsageTray
     internal static class CodexRateLimitClient
     {
         private const string Endpoint = "https://chatgpt.com/backend-api/codex/responses";
+        private const string UsageProbeModel = "gpt-5.6-sol";
 
         public static UsageSnapshot FetchUsage()
         {
@@ -27,7 +28,7 @@ namespace CodexUsageTray
             }
 
             string sessionId = GenerateSessionId();
-            byte[] payloadBytes = Encoding.UTF8.GetBytes(BuildPayload(sessionId, LoadConfiguredModel()));
+            byte[] payloadBytes = Encoding.UTF8.GetBytes(BuildPayload(sessionId, UsageProbeModel));
 
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(Endpoint);
             request.Method = "POST";
@@ -152,37 +153,6 @@ namespace CodexUsageTray
             }
 
             return null;
-        }
-
-        private static string LoadConfiguredModel()
-        {
-            string configPath = Path.Combine(AuthData.GetCodexHome(), "config.toml");
-            if (File.Exists(configPath))
-            {
-                foreach (string rawLine in File.ReadAllLines(configPath))
-                {
-                    string line = rawLine.Trim();
-                    if (!line.StartsWith("model ", StringComparison.OrdinalIgnoreCase) &&
-                        !line.StartsWith("model=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    int separator = line.IndexOf('=');
-                    if (separator < 0)
-                    {
-                        continue;
-                    }
-
-                    string model = line.Substring(separator + 1).Trim().Trim('"', '\'');
-                    if (!string.IsNullOrEmpty(model))
-                    {
-                        return model;
-                    }
-                }
-            }
-
-            return "gpt-5.5";
         }
 
         private static string ReadResponseBody(HttpWebResponse response)
