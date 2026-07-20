@@ -25,6 +25,7 @@ namespace CodexUsageTray
             AuthenticationRequired,
             ExitedEarly,
             RequestRejected,
+            LimitsUnavailable,
             InvalidResponse
         }
 
@@ -261,9 +262,9 @@ namespace CodexUsageTray
             snapshot.AvailableResets = ParseAvailableResetCredits(payload);
             snapshot.AdditionalLimits = ParseAdditionalLimits(rateLimitsById, attemptedAt);
 
-            if (!snapshot.HasAnyLimit)
+            if (!snapshot.HasPrimaryLimit)
             {
-                return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
+                return FromClassifiedError(FetchErrorKind.LimitsUnavailable, attemptedAt);
             }
 
             return snapshot;
@@ -848,7 +849,7 @@ namespace CodexUsageTray
             FetchErrorKind kind = IsAuthenticationMessage(message)
                 ? FetchErrorKind.AuthenticationRequired
                 : FetchErrorKind.RequestRejected;
-            return FromClassifiedError(kind, attemptedAt);
+            return FromClassifiedError(kind, attemptedAt, CompactErrorDetail(message, 160));
         }
 
         private static bool IsAuthenticationMessage(string message)
@@ -869,6 +870,14 @@ namespace CodexUsageTray
 
         private static UsageSnapshot FromClassifiedError(FetchErrorKind kind, DateTime attemptedAt)
         {
+            return FromClassifiedError(kind, attemptedAt, null);
+        }
+
+        private static UsageSnapshot FromClassifiedError(
+            FetchErrorKind kind,
+            DateTime attemptedAt,
+            string detail)
+        {
             string message;
             switch (kind)
             {
@@ -888,7 +897,12 @@ namespace CodexUsageTray
                     message = "Codex app-server exited before returning usage.";
                     break;
                 case FetchErrorKind.RequestRejected:
-                    message = "Codex app-server could not read usage limits.";
+                    message = string.IsNullOrEmpty(detail)
+                        ? "Codex app-server could not read usage limits."
+                        : "Codex app-server rejected the usage request: " + detail;
+                    break;
+                case FetchErrorKind.LimitsUnavailable:
+                    message = UsageSnapshot.PrimaryLimitsUnavailableMessage;
                     break;
                 default:
                     message = "Codex app-server returned invalid usage data.";
@@ -898,6 +912,42 @@ namespace CodexUsageTray
             UsageSnapshot snapshot = UsageSnapshot.FromError(message);
             snapshot.LastAttempted = attemptedAt;
             return snapshot;
+        }
+
+        private static string CompactErrorDetail(string value, int maxLength)
+        {
+            if (string.IsNullOrWhiteSpace(value) || maxLength <= 0)
+            {
+                return null;
+            }
+
+            StringBuilder compact = new StringBuilder(Math.Min(value.Length, maxLength));
+            bool pendingSpace = false;
+            for (int index = 0; index < value.Length && compact.Length < maxLength; index++)
+            {
+                char current = value[index];
+                if (char.IsControl(current) || char.IsWhiteSpace(current))
+                {
+                    pendingSpace = compact.Length > 0;
+                    continue;
+                }
+
+                if (pendingSpace && compact.Length < maxLength)
+                {
+                    if (compact.Length >= maxLength - 1)
+                    {
+                        break;
+                    }
+                    compact.Append(' ');
+                }
+                pendingSpace = false;
+                if (compact.Length < maxLength)
+                {
+                    compact.Append(current);
+                }
+            }
+
+            return compact.Length == 0 ? null : compact.ToString();
         }
 
         private static bool TryGetDictionary(

@@ -17,6 +17,9 @@ namespace CodexUsageTray.Tests
 
             TestRateLimitFixture(args[0]);
             TestMalformedResponses();
+            TestPartialPrimaryLimits();
+            TestMissingPrimaryLimits();
+            TestRpcErrors();
             TestDeepClone();
 
             if (failures != 0)
@@ -72,6 +75,63 @@ namespace CodexUsageTray.Tests
                 "\"usedPercent\":101,\"windowDurationMins\":300,\"resetsAt\":1783710153}}}}";
             UsageSnapshot invalid = CodexRateLimitClient.ParseRateLimitsResponse(invalidPercentage);
             AssertTrue(!string.IsNullOrEmpty(invalid.ErrorMessage), "out-of-range usage is rejected");
+        }
+
+        private static void TestPartialPrimaryLimits()
+        {
+            const string weeklyOnlyJson =
+                "{\"result\":{\"rateLimits\":{\"primary\":{" +
+                "\"usedPercent\":40,\"windowDurationMins\":10080}}}}";
+            UsageSnapshot weeklyOnly = CodexRateLimitClient.ParseRateLimitsResponse(weeklyOnlyJson);
+            AssertTrue(string.IsNullOrEmpty(weeklyOnly.ErrorMessage), "weekly-only usage is accepted");
+            AssertTrue(weeklyOnly.Weekly != null, "weekly-only response keeps weekly usage");
+            AssertTrue(weeklyOnly.FiveHour == null, "weekly-only response leaves 5-hour usage unavailable");
+
+            const string fiveHourOnlyJson =
+                "{\"result\":{\"rateLimits\":{\"primary\":{" +
+                "\"usedPercent\":25,\"windowDurationMins\":300}}}}";
+            UsageSnapshot fiveHourOnly = CodexRateLimitClient.ParseRateLimitsResponse(fiveHourOnlyJson);
+            AssertTrue(string.IsNullOrEmpty(fiveHourOnly.ErrorMessage), "5-hour-only usage is accepted");
+            AssertTrue(fiveHourOnly.FiveHour != null, "5-hour-only response keeps 5-hour usage");
+            AssertTrue(fiveHourOnly.Weekly == null, "5-hour-only response leaves weekly usage unavailable");
+        }
+
+        private static void TestMissingPrimaryLimits()
+        {
+            const string auxiliaryOnlyJson =
+                "{\"result\":{\"rateLimitsByLimitId\":{\"codex_spark\":{" +
+                "\"limitName\":\"Spark\",\"primary\":{" +
+                "\"usedPercent\":0,\"windowDurationMins\":300}}}}}";
+            UsageSnapshot auxiliaryOnly = CodexRateLimitClient.ParseRateLimitsResponse(auxiliaryOnlyJson);
+            AssertTrue(!string.IsNullOrEmpty(auxiliaryOnly.ErrorMessage), "auxiliary-only usage is rejected");
+            AssertContains(
+                auxiliaryOnly.ErrorMessage,
+                "weekly or 5-hour",
+                "missing primary limits have a specific error");
+        }
+
+        private static void TestRpcErrors()
+        {
+            const string rejectedJson =
+                "{\"error\":{\"message\":\"  usage service\\nrejected\\trequest  \"}}";
+            UsageSnapshot rejected = CodexRateLimitClient.ParseRateLimitsResponse(rejectedJson);
+            AssertContains(
+                rejected.ErrorMessage,
+                "usage service rejected request",
+                "RPC rejection preserves a compact reason");
+
+            const string authenticationJson =
+                "{\"error\":{\"message\":\"401 unauthorized: credential detail\"}}";
+            UsageSnapshot authentication = CodexRateLimitClient.ParseRateLimitsResponse(authenticationJson);
+            AssertEqual(
+                "Codex is not signed in. Run codex login.",
+                authentication.ErrorMessage,
+                "authentication failures use safe guidance");
+
+            string longReason = new string('x', 300);
+            UsageSnapshot bounded = CodexRateLimitClient.ParseRateLimitsResponse(
+                "{\"error\":{\"message\":\"" + longReason + "\"}}");
+            AssertTrue(bounded.ErrorMessage.Length < 230, "RPC rejection reasons are length-limited");
         }
 
         private static void TestDeepClone()
@@ -141,6 +201,19 @@ namespace CodexUsageTray.Tests
 
             failures++;
             Console.Error.WriteLine("FAIL: " + name + " (expected " + expected + ", actual " + actual + ")");
+        }
+
+        private static void AssertContains(string actual, string expectedFragment, string name)
+        {
+            if (!string.IsNullOrEmpty(actual) &&
+                actual.IndexOf(expectedFragment, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return;
+            }
+
+            failures++;
+            Console.Error.WriteLine(
+                "FAIL: " + name + " (expected to find " + expectedFragment + ", actual " + actual + ")");
         }
     }
 }

@@ -5,6 +5,9 @@ namespace CodexUsageTray
 {
     internal sealed class UsageSnapshot
     {
+        internal const string PrimaryLimitsUnavailableMessage =
+            "Codex did not return weekly or 5-hour usage limits.";
+
         public DateTime LastUpdated;
         public DateTime LastAttempted;
         public LimitWindow FiveHour;
@@ -19,11 +22,16 @@ namespace CodexUsageTray
         public bool IsRefreshing;
         public bool IsPaused;
 
+        public bool HasPrimaryLimit
+        {
+            get { return Weekly != null || FiveHour != null; }
+        }
+
         public bool HasAnyLimit
         {
             get
             {
-                if (Weekly != null || FiveHour != null)
+                if (HasPrimaryLimit)
                 {
                     return true;
                 }
@@ -77,7 +85,9 @@ namespace CodexUsageTray
         {
             UsageSnapshot snapshot = new UsageSnapshot();
             snapshot.LastAttempted = DateTime.Now;
-            snapshot.ErrorMessage = message;
+            snapshot.ErrorMessage = string.IsNullOrWhiteSpace(message)
+                ? "An unknown usage error occurred."
+                : message.Trim();
             return snapshot;
         }
     }
