@@ -33,6 +33,8 @@ namespace CodexUsageTray
         private Label trayTextHexLabel;
         private Label contrastStatusLabel;
         private Label updateStatusLabel;
+        private Control thresholdControls;
+        private Control trayBackgroundControls;
         private bool useCustomTrayBoxColor;
         private Color trayBoxColor;
         private Color trayTextColor;
@@ -124,7 +126,7 @@ namespace CodexUsageTray
             mainLayout.Controls.Add(BuildRefreshGroup(), 0, 1);
             mainLayout.Controls.Add(BuildAppearanceGroup(), 0, 2);
             mainLayout.Controls.Add(BuildPopupGroup(), 0, 3);
-            mainLayout.Controls.Add(BuildUpdatesGroup(), 0, 4);
+            mainLayout.Controls.Add(BuildSystemGroup(), 0, 4);
 
             TableLayoutPanel buttonLayout = new TableLayoutPanel();
             buttonLayout.AutoSize = true;
@@ -176,15 +178,37 @@ namespace CodexUsageTray
             GroupBox group = CreateGroup("Usage & alerts");
             TableLayoutPanel layout = CreateGroupLayout(1);
 
+            TableLayoutPanel metricRow = CreateGroupLayout(2);
+            metricRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            metricRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100.0F));
+
+            Label metricLabel = CreateRowLabel("Tray &icon shows", "Tray icon metric");
+            metricLabel.MinimumSize = new Size(92, 0);
+            metricRow.Controls.Add(metricLabel, 0, 0);
+
+            FlowLayoutPanel metricOptions = CreateFlowLayout();
+            weeklyRadio = CreateRadio("&Weekly", "Weekly usage remaining");
+            fiveHourRadio = CreateRadio("&5-hour", "Five-hour usage remaining");
+            metricOptions.Controls.Add(weeklyRadio);
+            metricOptions.Controls.Add(fiveHourRadio);
+            toolTip.SetToolTip(weeklyRadio, "Show weekly usage remaining in the tray icon.");
+            toolTip.SetToolTip(
+                fiveHourRadio,
+                "Show five-hour usage remaining. Weekly usage is used when the five-hour limit is unavailable.");
+            metricRow.Controls.Add(metricOptions, 1, 0);
+            layout.Controls.Add(metricRow, 0, 0);
+
             thresholdNotificationsCheckBox = CreateCheckBox(
-                "&Notify at thresholds",
-                "Notify at thresholds");
+                "&Usage threshold alerts",
+                "Usage threshold alerts");
+            thresholdNotificationsCheckBox.Margin = new Padding(3, 3, 3, 1);
             toolTip.SetToolTip(
                 thresholdNotificationsCheckBox,
                 "Show an alert when remaining usage first reaches the low or critical threshold.");
-            layout.Controls.Add(thresholdNotificationsCheckBox, 0, 0);
+            layout.Controls.Add(thresholdNotificationsCheckBox, 0, 1);
 
             FlowLayoutPanel thresholdRow = CreateFlowLayout();
+            thresholdRow.Margin = new Padding(18, 0, 0, 1);
             thresholdRow.Controls.Add(CreateRowLabel("&Critical", "Critical threshold"));
             criticalNumeric = CreateNumeric(1, 99, 66, "Critical threshold percent");
             thresholdRow.Controls.Add(criticalNumeric);
@@ -198,17 +222,8 @@ namespace CodexUsageTray
             thresholdRow.Controls.Add(CreateSuffixLabel("%"));
             toolTip.SetToolTip(criticalNumeric, "Critical must be less than or equal to Low. The paired value adjusts immediately.");
             toolTip.SetToolTip(lowNumeric, "Low must be greater than or equal to Critical. The paired value adjusts immediately.");
-            layout.Controls.Add(thresholdRow, 0, 1);
-
-            FlowLayoutPanel metricRow = CreateFlowLayout();
-            metricRow.Controls.Add(CreateRowLabel("Tray &icon:", "Tray icon metric"));
-            weeklyRadio = CreateRadio("&Weekly remaining", "Weekly usage remaining");
-            fiveHourRadio = CreateRadio("&5-hour remaining", "Five-hour usage remaining");
-            metricRow.Controls.Add(weeklyRadio);
-            metricRow.Controls.Add(fiveHourRadio);
-            toolTip.SetToolTip(weeklyRadio, "Show weekly usage remaining in the tray icon.");
-            toolTip.SetToolTip(fiveHourRadio, "Show five-hour usage remaining in the tray icon.");
-            layout.Controls.Add(metricRow, 0, 2);
+            thresholdControls = thresholdRow;
+            layout.Controls.Add(thresholdRow, 0, 2);
 
             group.Controls.Add(layout);
             return group;
@@ -217,24 +232,28 @@ namespace CodexUsageTray
         private GroupBox BuildRefreshGroup()
         {
             GroupBox group = CreateGroup("Refresh");
-            FlowLayoutPanel row = CreateFlowLayout();
-            row.Dock = DockStyle.Top;
+            TableLayoutPanel layout = CreateGroupLayout(3);
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100.0F));
 
-            row.Controls.Add(CreateRowLabel("&Active", "Active refresh interval"));
+            Label runningLabel = CreateRowLabel("Codex &running", "Refresh interval while Codex is running");
+            runningLabel.MinimumSize = new Size(112, 0);
+            layout.Controls.Add(runningLabel, 0, 0);
             refreshNumeric = CreateNumeric(30, 3600, 70, "Active refresh interval in seconds");
-            row.Controls.Add(refreshNumeric);
-            row.Controls.Add(CreateSuffixLabel("sec"));
+            layout.Controls.Add(refreshNumeric, 1, 0);
+            layout.Controls.Add(CreateSuffixLabel("seconds"), 2, 0);
 
-            Label idleLabel = CreateRowLabel("&Idle", "Idle refresh interval");
-            idleLabel.Margin = new Padding(14, 3, 3, 1);
-            row.Controls.Add(idleLabel);
+            Label idleLabel = CreateRowLabel("Codex &closed", "Refresh interval while Codex is closed");
+            idleLabel.MinimumSize = new Size(112, 0);
+            layout.Controls.Add(idleLabel, 0, 1);
             idleRefreshNumeric = CreateNumeric(0, 7200, 70, "Idle refresh interval in seconds");
-            row.Controls.Add(idleRefreshNumeric);
-            row.Controls.Add(CreateSuffixLabel("sec (0 = off)"));
-            toolTip.SetToolTip(refreshNumeric, "Refresh interval while the computer is active, from 30 to 3600 seconds.");
-            toolTip.SetToolTip(idleRefreshNumeric, "Use 0 to disable idle refresh, or a value at least as large as Active.");
+            layout.Controls.Add(idleRefreshNumeric, 1, 1);
+            layout.Controls.Add(CreateSuffixLabel("seconds (0 = off)"), 2, 1);
+            toolTip.SetToolTip(refreshNumeric, "Refresh every 30 to 3600 seconds while Codex is running.");
+            toolTip.SetToolTip(idleRefreshNumeric, "Use 0 to pause checks while Codex is closed, or use a value at least as large as the running interval.");
 
-            group.Controls.Add(row);
+            group.Controls.Add(layout);
             return group;
         }
 
@@ -267,31 +286,23 @@ namespace CodexUsageTray
             toolTip.SetToolTip(themeCombo, "Use the Windows app theme, dark mode, or light mode.");
             layout.Controls.Add(themeRow, 0, 0);
 
-            TableLayoutPanel optionsRow = CreateGroupLayout(2);
-            optionsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50.0F));
-            optionsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50.0F));
-
-            colorBarsCheckBox = CreateCheckBox(
-                "Color by &remaining usage",
-                "Color by remaining usage");
-            optionsRow.Controls.Add(colorBarsCheckBox, 0, 0);
-
             showTrayBoxCheckBox = CreateCheckBox(
                 "Show tray &background",
                 "Show tray background");
-            optionsRow.Controls.Add(showTrayBoxCheckBox, 1, 0);
-            layout.Controls.Add(optionsRow, 0, 1);
+            showTrayBoxCheckBox.Margin = new Padding(3, 3, 3, 1);
+            layout.Controls.Add(showTrayBoxCheckBox, 0, 1);
 
-            TableLayoutPanel colorLayout = CreateGroupLayout(4);
-            colorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            colorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            TableLayoutPanel colorLayout = CreateGroupLayout(2);
             colorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             colorLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100.0F));
 
-            colorLayout.Controls.Add(CreateRowLabel("&Background", "Tray background color"), 0, 0);
+            Label backgroundLabel = CreateRowLabel("&Background", "Tray background color");
+            backgroundLabel.MinimumSize = new Size(82, 0);
+            colorLayout.Controls.Add(backgroundLabel, 0, 0);
+            FlowLayoutPanel backgroundRow = CreateFlowLayout();
             trayBoxColorButton = CreateColorButton("Choose tray background color");
             trayBoxColorButton.Click += delegate { PickTrayBoxColor(); };
-            colorLayout.Controls.Add(trayBoxColorButton, 1, 0);
+            backgroundRow.Controls.Add(trayBoxColorButton);
 
             trayBoxHexLabel = CreateValueLabel("Tray background color value");
             trayBoxAutoButton = CreateButton("&Auto", "Use automatic tray background color", 54);
@@ -302,23 +313,33 @@ namespace CodexUsageTray
                 useCustomTrayBoxColor = false;
                 UpdatePreviews();
             };
-            colorLayout.Controls.Add(trayBoxAutoButton, 2, 0);
+            backgroundRow.Controls.Add(trayBoxAutoButton);
+            backgroundRow.Controls.Add(trayBoxHexLabel);
+            trayBackgroundControls = backgroundRow;
+            colorLayout.Controls.Add(backgroundRow, 1, 0);
 
-            colorLayout.Controls.Add(trayBoxHexLabel, 3, 0);
-
-            colorLayout.Controls.Add(CreateRowLabel("&Text", "Tray text color"), 0, 1);
+            Label textLabel = CreateRowLabel("&Text", "Tray text color");
+            textLabel.MinimumSize = new Size(82, 0);
+            colorLayout.Controls.Add(textLabel, 0, 1);
+            FlowLayoutPanel textRow = CreateFlowLayout();
             trayTextColorButton = CreateColorButton("Choose tray text color");
             trayTextColorButton.Click += delegate { PickTrayTextColor(); };
-            colorLayout.Controls.Add(trayTextColorButton, 1, 1);
+            textRow.Controls.Add(trayTextColorButton);
 
             trayTextHexLabel = CreateValueLabel("Tray text color value");
-            colorLayout.Controls.Add(trayTextHexLabel, 3, 1);
+            textRow.Controls.Add(trayTextHexLabel);
+            colorLayout.Controls.Add(textRow, 1, 1);
             layout.Controls.Add(colorLayout, 0, 2);
 
-            FlowLayoutPanel previewRow = CreateFlowLayout();
-            Label previewLabel = CreateRowLabel("Live tray &preview", "Live tray preview");
+            TableLayoutPanel previewLayout = CreateGroupLayout(2);
+            previewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            previewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100.0F));
+            Label previewLabel = CreateRowLabel("Tray &preview", "Live tray preview");
+            previewLabel.MinimumSize = new Size(82, 0);
             previewLabel.Margin = new Padding(3, 9, 5, 1);
-            previewRow.Controls.Add(previewLabel);
+            previewLayout.Controls.Add(previewLabel, 0, 0);
+
+            FlowLayoutPanel previewRow = CreateFlowLayout();
 
             trayPreview = new PictureBox();
             trayPreview.AccessibleName = "Live tray preview";
@@ -341,11 +362,12 @@ namespace CodexUsageTray
             previewSuffix.Margin = new Padding(0, 9, 3, 1);
             previewRow.Controls.Add(previewSuffix);
             toolTip.SetToolTip(previewPercentNumeric, "Change this sample percentage to preview normal, low, and critical tray states.");
-            layout.Controls.Add(previewRow, 0, 3);
+            previewLayout.Controls.Add(previewRow, 1, 0);
+            layout.Controls.Add(previewLayout, 0, 3);
 
             contrastStatusLabel = CreateValueLabel("Tray text contrast guidance");
-            contrastStatusLabel.MaximumSize = new Size(340, 0);
-            contrastStatusLabel.Margin = new Padding(3, 1, 3, 1);
+            contrastStatusLabel.MaximumSize = new Size(250, 0);
+            contrastStatusLabel.Margin = new Padding(88, 1, 3, 1);
             layout.Controls.Add(contrastStatusLabel, 0, 4);
 
             group.Controls.Add(layout);
@@ -354,38 +376,50 @@ namespace CodexUsageTray
 
         private GroupBox BuildPopupGroup()
         {
-            GroupBox group = CreateGroup("Popup & startup");
+            GroupBox group = CreateGroup("Popup");
             TableLayoutPanel layout = CreateGroupLayout(2);
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50.0F));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50.0F));
 
-            showResetAvailabilityCheckBox = CreateCheckBox(
-                "Show reset a&vailability",
-                "Show reset availability");
-            layout.Controls.Add(showResetAvailabilityCheckBox, 0, 0);
+            showLastUpdatedCheckBox = CreateCheckBox(
+                "Show &updated time",
+                "Show updated time");
+            layout.Controls.Add(showLastUpdatedCheckBox, 0, 0);
 
             showResetTimesCheckBox = CreateCheckBox(
                 "Show &reset times",
                 "Show reset times");
             layout.Controls.Add(showResetTimesCheckBox, 1, 0);
 
-            showLastUpdatedCheckBox = CreateCheckBox(
-                "Show &updated time",
-                "Show updated time");
-            layout.Controls.Add(showLastUpdatedCheckBox, 0, 1);
+            showResetAvailabilityCheckBox = CreateCheckBox(
+                "Show &limit resets",
+                "Show available limit resets");
+            toolTip.SetToolTip(
+                showResetAvailabilityCheckBox,
+                "Show available limit reset credits and expiration dates in the expanded popup.");
+            layout.Controls.Add(showResetAvailabilityCheckBox, 0, 1);
 
-            startWithWindowsCheckBox = CreateCheckBox(
-                "&Start with Windows",
-                "Start with Windows");
-            layout.Controls.Add(startWithWindowsCheckBox, 1, 1);
+            colorBarsCheckBox = CreateCheckBox(
+                "Color &usage bars",
+                "Color usage bars by remaining usage");
+            toolTip.SetToolTip(colorBarsCheckBox, "Color popup bars by normal, low, and critical usage levels.");
+            layout.Controls.Add(colorBarsCheckBox, 1, 1);
 
             group.Controls.Add(layout);
             return group;
         }
 
-        private GroupBox BuildUpdatesGroup()
+        private GroupBox BuildSystemGroup()
         {
-            GroupBox group = CreateGroup("Updates");
+            GroupBox group = CreateGroup("Startup & updates");
+            TableLayoutPanel groupLayout = CreateGroupLayout(1);
+
+            startWithWindowsCheckBox = CreateCheckBox(
+                "&Start with Windows",
+                "Start with Windows");
+            toolTip.SetToolTip(startWithWindowsCheckBox, "Launch Codex Usage Tray when you sign in to Windows.");
+            groupLayout.Controls.Add(startWithWindowsCheckBox, 0, 0);
+
             TableLayoutPanel layout = CreateGroupLayout(3);
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100.0F));
@@ -415,7 +449,8 @@ namespace CodexUsageTray
             };
             layout.Controls.Add(checkUpdatesButton, 2, 0);
 
-            group.Controls.Add(layout);
+            groupLayout.Controls.Add(layout, 0, 1);
+            group.Controls.Add(groupLayout);
             return group;
         }
 
@@ -448,6 +483,7 @@ namespace CodexUsageTray
             trayTextColor = settings.GetTrayTextColor();
             SelectTheme(settings.Theme);
             adjustingValues = false;
+            UpdateDependentControlStates();
         }
 
         private void WireEvents()
@@ -518,7 +554,12 @@ namespace CodexUsageTray
                     UpdatePreviews();
                 }
             };
-            showTrayBoxCheckBox.CheckedChanged += delegate { UpdatePreviews(); };
+            thresholdNotificationsCheckBox.CheckedChanged += delegate { UpdateDependentControlStates(); };
+            showTrayBoxCheckBox.CheckedChanged += delegate
+            {
+                UpdateDependentControlStates();
+                UpdatePreviews();
+            };
             previewPercentNumeric.ValueChanged += delegate { UpdatePreviews(); };
         }
 
@@ -604,8 +645,25 @@ namespace CodexUsageTray
             previewPercentNumeric.Value = 50;
             SelectTheme(defaults.Theme);
             adjustingValues = false;
+            UpdateDependentControlStates();
             ApplyCurrentTheme();
             UpdatePreviews();
+        }
+
+        private void UpdateDependentControlStates()
+        {
+            if (thresholdControls != null)
+            {
+                thresholdControls.Enabled = thresholdNotificationsCheckBox.Checked;
+            }
+            if (trayBackgroundControls != null)
+            {
+                trayBackgroundControls.Enabled = showTrayBoxCheckBox.Checked;
+            }
+            if (trayBoxAutoButton != null)
+            {
+                trayBoxAutoButton.Enabled = showTrayBoxCheckBox.Checked && useCustomTrayBoxColor;
+            }
         }
 
         public void SetUpdateButtonState(bool busy, string busyText)
@@ -716,7 +774,7 @@ namespace CodexUsageTray
             trayTextColorButton.Text = "";
             trayTextColorButton.AccessibleDescription = "Current tray text color " + textHex;
 
-            trayBoxAutoButton.Enabled = useCustomTrayBoxColor;
+            trayBoxAutoButton.Enabled = showTrayBoxCheckBox.Checked && useCustomTrayBoxColor;
             trayBoxHexLabel.Text = useCustomTrayBoxColor
                 ? effectiveBackgroundHex
                 : "Auto (" + effectiveBackgroundHex + ")";
@@ -764,7 +822,7 @@ namespace CodexUsageTray
         {
             if (!showTrayBoxCheckBox.Checked)
             {
-                contrastStatusLabel.Text = "Background hidden: use text that contrasts with the taskbar.";
+                contrastStatusLabel.Text = "Text must contrast with the taskbar.";
                 contrastStatusLabel.AccessibleDescription = contrastStatusLabel.Text;
                 contrastStatusLabel.ForeColor = SystemInformation.HighContrast
                     ? SystemColors.ControlText
@@ -779,12 +837,11 @@ namespace CodexUsageTray
             Color recommended = blackRatio >= whiteRatio ? Color.Black : Color.White;
             string recommendedHex = AppSettings.FormatColor(recommended);
             bool lowContrast = ratio < 4.5;
+            string ratioText = ratio.ToString("0.00") + ":1";
 
-            contrastStatusLabel.Text = (lowContrast ? "Low contrast " : "Contrast ")
-                + ratio.ToString("0.00")
-                + ":1. Recommended text: "
-                + recommendedHex
-                + ".";
+            contrastStatusLabel.Text = lowContrast
+                ? "Low contrast " + ratioText + ". Try " + recommendedHex + "."
+                : "Contrast " + ratioText;
             contrastStatusLabel.AccessibleDescription = contrastStatusLabel.Text;
             contrastStatusLabel.ForeColor = lowContrast
                 ? GetWarningColor()
