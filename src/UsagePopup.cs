@@ -84,7 +84,7 @@ namespace CodexUsageTray
             actionToolTip.ShowAlways = true;
             actionToolTip.SetToolTip(refreshButton, "Refresh usage");
             actionToolTip.SetToolTip(settingsButton, "Open settings");
-            actionToolTip.SetToolTip(detailsButton, "Show limit details");
+            actionToolTip.SetToolTip(detailsButton, "Show limit resets");
 
             ApplyThemeColors();
             UpdateActionButtonState();
@@ -332,9 +332,9 @@ namespace CodexUsageTray
         {
             Button button = new Button();
             button.Name = "detailsButton";
-            button.Text = "Details";
+            button.Text = "Limit resets";
             button.Font = detailFont;
-            button.AccessibleName = "Show limit details";
+            button.AccessibleName = "Show limit resets";
             button.AccessibleDescription = "Show available limit reset expirations";
             button.AccessibleRole = AccessibleRole.PushButton;
             button.TabIndex = 2;
@@ -468,29 +468,26 @@ namespace CodexUsageTray
                 titleBounds.Height);
             TextRenderer.DrawText(graphics, title, titleFont, titleTextBounds, textColor, flags);
 
-            string headerDetail = FormatPlanType(snapshot != null ? snapshot.PlanType : null);
+            string headerDetail = null;
             if ((settings == null || settings.ShowPopupLastUpdated) &&
                 snapshot != null && snapshot.LastUpdated != DateTime.MinValue)
             {
-                string updated = "Updated " + TimeFormatter.FormatClock(snapshot.LastUpdated);
-                headerDetail = string.IsNullOrEmpty(headerDetail)
-                    ? updated
-                    : headerDetail + "  |  " + updated;
+                headerDetail = "Updated " + TimeFormatter.FormatClock(snapshot.LastUpdated);
             }
 
             if (!string.IsNullOrEmpty(headerDetail))
             {
-                int planLeft = titleTextBounds.Right + ScaleMetric(8);
-                Rectangle planBounds = new Rectangle(
-                    planLeft,
+                int detailLeft = titleTextBounds.Right + ScaleMetric(8);
+                Rectangle detailBounds = new Rectangle(
+                    detailLeft,
                     top,
-                    Math.Max(0, right - planLeft),
+                    Math.Max(0, right - detailLeft),
                     height);
                 TextRenderer.DrawText(
                     graphics,
                     headerDetail,
                     detailFont,
-                    planBounds,
+                    detailBounds,
                     mutedColor,
                     flags | TextFormatFlags.EndEllipsis);
             }
@@ -1016,8 +1013,8 @@ namespace CodexUsageTray
                 ClientSize.Width - ScaleMetric(20),
                 ScaleMetric(LogicalDetailsButtonHeight));
             detailsButton.AccessibleName = detailsExpanded
-                ? "Hide limit details"
-                : "Show limit details";
+                ? "Hide limit resets"
+                : "Show limit resets";
             detailsButton.AccessibleDescription = detailsButton.AccessibleName;
             actionToolTip.SetToolTip(detailsButton, detailsButton.AccessibleName);
             detailsButton.Invalidate();
@@ -1237,26 +1234,6 @@ namespace CodexUsageTray
             path.AddArc(bounds.Left, bounds.Bottom - diameter - 1, diameter, diameter, 90, 90);
             path.CloseFigure();
             return path;
-        }
-
-        private static string FormatPlanType(string planType)
-        {
-            string value = CompactSingleLine(planType, 48);
-            if (string.IsNullOrEmpty(value))
-            {
-                return null;
-            }
-
-            value = value.Replace('_', ' ');
-            if (value.Length > 0)
-            {
-                value = char.ToUpper(value[0], CultureInfo.CurrentCulture) + value.Substring(1);
-            }
-            if (value.IndexOf("plan", StringComparison.OrdinalIgnoreCase) < 0)
-            {
-                value += " plan";
-            }
-            return value;
         }
 
         private static string CompactSingleLine(string value, int maxLength)
