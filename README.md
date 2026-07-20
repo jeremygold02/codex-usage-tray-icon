@@ -2,7 +2,7 @@
 
 Codex Usage Tray is a Windows tray utility for monitoring the usage limits of the account signed in to the Codex CLI. The tray icon shows the selected remaining-usage percentage, and a left-click opens a compact popup with the current plan, weekly and 5-hour remaining usage, last update time, and reset timing when available.
 
-![Codex Usage tray popup](docs/images/tray-usage-popup.png)
+![Codex Usage tray popup with expanded details](docs/images/tray-usage-details.png)
 
 ## Requirements
 
@@ -24,13 +24,11 @@ Each refresh starts a short-lived local `codex app-server --stdio` process and r
 
 The popup opens in its compact state and shows the primary weekly and 5-hour limits. A status line appears while refreshing, when automatic checks are paused, or when the latest refresh failed.
 
-When the account response includes reset credits, a `Details` control appears. Expand it to see:
+When the account response includes reset credits, a `Limit resets` control appears. Expand it to see:
 
 - Available reset credits, including their titles and local expiration date/time when supplied by Codex.
 
-![Expanded Codex Usage details](docs/images/tray-usage-details.png)
-
-The related Settings options can hide reset availability, reset times, or last-updated times. Details are collapsed again the next time the popup opens.
+The related Settings options can hide reset availability, reset times, or last-updated times. Limit resets are collapsed again the next time the popup opens.
 
 ## Refresh and settings
 
