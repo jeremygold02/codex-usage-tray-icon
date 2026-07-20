@@ -22,6 +22,9 @@ namespace CodexUsageTray
         private const string RefreshingStatus = "Refreshing usage...";
         private const string RefreshFailedStatus = "Refresh failed; showing last known usage.";
         private const string RefreshFailedWithoutDataStatus = "Unable to refresh usage. Try again.";
+        private const string RefreshCanceledStatus = "Usage refresh was canceled. Try again.";
+        private const string RefreshReturnedNoDataStatus = "Codex usage check returned no result.";
+        private const string UnexpectedRefreshFailureStatus = "Unexpected error while refreshing usage.";
         private const string PausedStatus = "Automatic refresh paused while Codex is not running.";
         private const string PausedAfterFailureStatus = "Automatic refresh paused; last refresh failed.";
         private const string WaitingStatus = "Waiting for Codex to start...";
@@ -330,19 +333,61 @@ namespace CodexUsageTray
             refreshFeedbackRequested = false;
             SetUsagePopupRefreshing(false);
 
-            UsageSnapshot failedSnapshot = !task.IsCanceled && !task.IsFaulted
-                ? task.Result
-                : null;
-            if (failedSnapshot == null || !string.IsNullOrEmpty(failedSnapshot.ErrorMessage))
+            UsageSnapshot completedSnapshot = GetCompletedRefreshSnapshot(task);
+            if (!string.IsNullOrEmpty(completedSnapshot.ErrorMessage))
             {
-                ApplyRefreshFailure(failedSnapshot, showFeedback);
+                ApplyRefreshFailure(completedSnapshot, showFeedback);
             }
             else
             {
-                ApplySuccessfulSnapshot(task.Result, showFeedback);
+                ApplySuccessfulSnapshot(completedSnapshot, showFeedback);
             }
 
             RefreshUsageIfDue(false);
+        }
+
+        private static UsageSnapshot GetCompletedRefreshSnapshot(Task<UsageSnapshot> task)
+        {
+            if (task == null)
+            {
+                return UsageSnapshot.FromError(UnexpectedRefreshFailureStatus);
+            }
+            if (task.IsCanceled)
+            {
+                return UsageSnapshot.FromError(RefreshCanceledStatus);
+            }
+            if (task.IsFaulted)
+            {
+                AggregateException aggregate = task.Exception;
+                Exception failure = aggregate != null ? aggregate.GetBaseException() : null;
+                return UsageSnapshot.FromError(GetUnexpectedRefreshMessage(failure));
+            }
+
+            UsageSnapshot snapshot = task.Result;
+            if (snapshot == null)
+            {
+                return UsageSnapshot.FromError(RefreshReturnedNoDataStatus);
+            }
+            if (string.IsNullOrWhiteSpace(snapshot.ErrorMessage) && !snapshot.HasPrimaryLimit)
+            {
+                return UsageSnapshot.FromError(UsageSnapshot.PrimaryLimitsUnavailableMessage);
+            }
+
+            return snapshot;
+        }
+
+        private static string GetUnexpectedRefreshMessage(Exception failure)
+        {
+            if (failure is UnauthorizedAccessException)
+            {
+                return "Windows denied access while starting the Codex usage check.";
+            }
+            if (failure is IOException)
+            {
+                return "Codex usage data could not be read. Try again.";
+            }
+
+            return UnexpectedRefreshFailureStatus;
         }
 
         private void ApplyRefreshingState()
@@ -552,7 +597,7 @@ namespace CodexUsageTray
             {
                 if (iconWindow == null)
                 {
-                    SetTrayIcon(IconRenderer.CreateUnknownIcon("..."));
+                    SetTrayIcon(IconRenderer.CreateErrorIcon());
                 }
                 else
                 {
@@ -586,20 +631,52 @@ namespace CodexUsageTray
 
         private static string BuildTooltip(UsageSnapshot snapshot)
         {
-            return "Weekly " + FormatWindow(snapshot.Weekly) + " | 5h " + FormatWindow(snapshot.FiveHour);
+            if (snapshot == null)
+            {
+                return "Usage unavailable";
+            }
+
+            List<string> windows = new List<string>();
+            if (snapshot.Weekly != null)
+            {
+                windows.Add("Weekly " + FormatWindow(snapshot.Weekly));
+            }
+            if (snapshot.FiveHour != null)
+            {
+                windows.Add("5h " + FormatWindow(snapshot.FiveHour));
+            }
+            return windows.Count > 0
+                ? string.Join(" | ", windows.ToArray())
+                : "Usage unavailable";
         }
 
         private static string BuildNativeTooltip(UsageSnapshot snapshot)
         {
-            return "Codex Usage Remaining" + Environment.NewLine +
-                "Weekly: " + FormatNativeWindow(snapshot.Weekly) + Environment.NewLine +
-                "5h: " + FormatNativeWindow(snapshot.FiveHour);
+            StringBuilder tooltip = new StringBuilder("Codex Usage Remaining");
+            if (snapshot != null && snapshot.Weekly != null)
+            {
+                tooltip.AppendLine();
+                tooltip.Append("Weekly: ");
+                tooltip.Append(FormatNativeWindow(snapshot.Weekly));
+            }
+            if (snapshot != null && snapshot.FiveHour != null)
+            {
+                tooltip.AppendLine();
+                tooltip.Append("5h: ");
+                tooltip.Append(FormatNativeWindow(snapshot.FiveHour));
+            }
+            if (snapshot == null || !snapshot.HasPrimaryLimit)
+            {
+                tooltip.AppendLine();
+                tooltip.Append("Usage unavailable");
+            }
+            return tooltip.ToString();
         }
 
         private static string BuildNativeTooltipWithStatus(UsageSnapshot snapshot)
         {
             string tooltip = BuildNativeTooltip(snapshot);
-            if (!string.IsNullOrWhiteSpace(snapshot.StatusMessage))
+            if (snapshot != null && !string.IsNullOrWhiteSpace(snapshot.StatusMessage))
             {
                 tooltip += Environment.NewLine + snapshot.StatusMessage;
             }
@@ -610,7 +687,7 @@ namespace CodexUsageTray
         {
             if (window == null)
             {
-                return "unknown";
+                return "unavailable";
             }
 
             int remaining = ClampPercent(100.0 - window.UsedPercent);
@@ -624,7 +701,7 @@ namespace CodexUsageTray
         {
             if (window == null)
             {
-                return "unknown";
+                return "unavailable";
             }
 
             string reset = window.ResetAfterSeconds.HasValue
@@ -724,9 +801,13 @@ namespace CodexUsageTray
                 return null;
             }
 
-            return string.Equals(settings.IconMetric, AppSettings.IconMetricFiveHour, StringComparison.OrdinalIgnoreCase)
-                ? snapshot.FiveHour
-                : snapshot.Weekly;
+            bool preferFiveHour = string.Equals(
+                settings.IconMetric,
+                AppSettings.IconMetricFiveHour,
+                StringComparison.OrdinalIgnoreCase);
+            LimitWindow preferred = preferFiveHour ? snapshot.FiveHour : snapshot.Weekly;
+            LimitWindow fallback = preferFiveHour ? snapshot.Weekly : snapshot.FiveHour;
+            return preferred ?? fallback;
         }
 
         private bool UpdateThresholdNotifications(UsageSnapshot snapshot)

@@ -10,9 +10,11 @@ namespace CodexUsageTray
     {
         private const int WmDpiChanged = 0x02E0;
         private const int LogicalWidth = 390;
-        private const int LogicalBaseHeight = 184;
+        private const int LogicalUsageTop = 43;
+        private const int LogicalUsageRowHeight = 67;
+        private const int LogicalFooterTopGap = 5;
+        private const int LogicalContentBottomPadding = 2;
         private const int LogicalFooterLineHeight = 18;
-        private const int LogicalFooterContentTop = 182;
         private const int LogicalDetailsButtonHeight = 22;
         private const int LogicalFooterBottomPadding = 5;
         private const string RefreshGlyph = "\uE72C";
@@ -280,24 +282,32 @@ namespace CodexUsageTray
             DrawHeader(graphics, textColor, mutedColor);
 
             DateTime lastUpdated = snapshot != null ? snapshot.LastUpdated : DateTime.MinValue;
-            DrawUsageRow(
-                graphics,
-                "Weekly",
-                snapshot != null ? snapshot.Weekly : null,
-                lastUpdated,
-                ScaleMetric(14),
-                ScaleMetric(43),
-                textColor,
-                mutedColor);
-            DrawUsageRow(
-                graphics,
-                "5-hour",
-                snapshot != null ? snapshot.FiveHour : null,
-                lastUpdated,
-                ScaleMetric(14),
-                ScaleMetric(110),
-                textColor,
-                mutedColor);
+            int rowY = LogicalUsageTop;
+            if (snapshot != null && snapshot.Weekly != null)
+            {
+                DrawUsageRow(
+                    graphics,
+                    "Weekly",
+                    snapshot.Weekly,
+                    lastUpdated,
+                    ScaleMetric(14),
+                    ScaleMetric(rowY),
+                    textColor,
+                    mutedColor);
+                rowY += LogicalUsageRowHeight;
+            }
+            if (snapshot != null && snapshot.FiveHour != null)
+            {
+                DrawUsageRow(
+                    graphics,
+                    "5-hour",
+                    snapshot.FiveHour,
+                    lastUpdated,
+                    ScaleMetric(14),
+                    ScaleMetric(rowY),
+                    textColor,
+                    mutedColor);
+            }
 
             if (!string.IsNullOrEmpty(BuildStatusLine()) || HasExpandableDetails())
             {
@@ -503,6 +513,11 @@ namespace CodexUsageTray
             Color textColor,
             Color mutedColor)
         {
+            if (window == null)
+            {
+                return;
+            }
+
             int width = ClientSize.Width - x - ScaleMetric(14);
             Rectangle labelBounds = new Rectangle(x, y, width, ScaleMetric(18));
             TextFormatFlags singleLine = TextFormatFlags.SingleLine |
@@ -519,61 +534,48 @@ namespace CodexUsageTray
                 graphics.FillRectangle(trackBrush, barBounds);
             }
 
-            if (window == null)
+            int remaining = window.RemainingPercent;
+            int fillWidth = (int)Math.Round(barBounds.Width * (remaining / 100.0));
+            if (fillWidth < 0)
             {
-                TextRenderer.DrawText(
-                    graphics,
-                    "unknown",
-                    detailFont,
-                    barBounds,
-                    mutedColor,
-                    singleLine | TextFormatFlags.HorizontalCenter);
+                fillWidth = 0;
             }
-            else
+            if (fillWidth > barBounds.Width)
             {
-                int remaining = window.RemainingPercent;
-                int fillWidth = (int)Math.Round(barBounds.Width * (remaining / 100.0));
-                if (fillWidth < 0)
-                {
-                    fillWidth = 0;
-                }
-                if (fillWidth > barBounds.Width)
-                {
-                    fillWidth = barBounds.Width;
-                }
-
-                Color fillColor = GetBarColor(remaining, dark);
-                if (fillWidth > 0)
-                {
-                    using (Brush fillBrush = new SolidBrush(fillColor))
-                    {
-                        graphics.FillRectangle(
-                            fillBrush,
-                            new Rectangle(barBounds.X, barBounds.Y, fillWidth, barBounds.Height));
-                    }
-                }
-
-                Color percentBackground = fillWidth >= (barBounds.Width / 2) ? fillColor : trackColor;
-                Color percentColor = GetContrastingTextColor(percentBackground);
-                if (SystemInformation.HighContrast)
-                {
-                    percentColor = fillWidth >= (barBounds.Width / 2)
-                        ? SystemColors.HighlightText
-                        : SystemColors.WindowText;
-                }
-                TextRenderer.DrawText(
-                    graphics,
-                    remaining.ToString(CultureInfo.CurrentCulture) + "%",
-                    percentFont,
-                    barBounds,
-                    percentColor,
-                    singleLine | TextFormatFlags.HorizontalCenter);
+                fillWidth = barBounds.Width;
             }
+
+            Color fillColor = GetBarColor(remaining, dark);
+            if (fillWidth > 0)
+            {
+                using (Brush fillBrush = new SolidBrush(fillColor))
+                {
+                    graphics.FillRectangle(
+                        fillBrush,
+                        new Rectangle(barBounds.X, barBounds.Y, fillWidth, barBounds.Height));
+                }
+            }
+
+            Color percentBackground = fillWidth >= (barBounds.Width / 2) ? fillColor : trackColor;
+            Color percentColor = GetContrastingTextColor(percentBackground);
+            if (SystemInformation.HighContrast)
+            {
+                percentColor = fillWidth >= (barBounds.Width / 2)
+                    ? SystemColors.HighlightText
+                    : SystemColors.WindowText;
+            }
+            TextRenderer.DrawText(
+                graphics,
+                remaining.ToString(CultureInfo.CurrentCulture) + "%",
+                percentFont,
+                barBounds,
+                percentColor,
+                singleLine | TextFormatFlags.HorizontalCenter);
 
             string rightDetail = "";
             if (settings == null || settings.ShowPopupResetTimes)
             {
-                rightDetail = window != null && window.ResetAfterSeconds.HasValue
+                rightDetail = window.ResetAfterSeconds.HasValue
                     ? "Next reset: " + TimeFormatter.FormatResetDateTime(lastUpdated, window.ResetAfterSeconds.Value) +
                         " (" + TimeFormatter.FormatDuration(window.ResetAfterSeconds.Value) + ")"
                     : "Next reset: ?";
@@ -692,18 +694,22 @@ namespace CodexUsageTray
             Color borderColor,
             bool dark)
         {
-            int dividerY = ScaleMetric(176);
-            using (Pen dividerPen = new Pen(borderColor, Math.Max(1.0f, currentDpi / 96.0f)))
+            int footerContentTop = GetLogicalFooterContentTop();
+            int dividerY = ScaleMetric(footerContentTop - 6);
+            if (GetVisibleUsageRowCount() > 0)
             {
-                graphics.DrawLine(
-                    dividerPen,
-                    ScaleMetric(10),
-                    dividerY,
-                    ClientSize.Width - ScaleMetric(10),
-                    dividerY);
+                using (Pen dividerPen = new Pen(borderColor, Math.Max(1.0f, currentDpi / 96.0f)))
+                {
+                    graphics.DrawLine(
+                        dividerPen,
+                        ScaleMetric(10),
+                        dividerY,
+                        ClientSize.Width - ScaleMetric(10),
+                        dividerY);
+                }
             }
 
-            int y = ScaleMetric(LogicalFooterContentTop);
+            int y = ScaleMetric(footerContentTop);
             TextFormatFlags flags = TextFormatFlags.SingleLine |
                 TextFormatFlags.VerticalCenter |
                 TextFormatFlags.EndEllipsis |
@@ -884,7 +890,7 @@ namespace CodexUsageTray
             }
 
             string providedStatus = CompactSingleLine(snapshot.StatusMessage, 120);
-            bool hasUsage = snapshot.Weekly != null || snapshot.FiveHour != null;
+            bool hasUsage = snapshot.HasPrimaryLimit;
 
             if (IsRefreshActive())
             {
@@ -947,10 +953,11 @@ namespace CodexUsageTray
                     detailsExpanded = false;
                 }
 
-                int logicalHeight = LogicalBaseHeight;
+                int footerContentTop = GetLogicalFooterContentTop();
+                int logicalHeight = footerContentTop + LogicalContentBottomPadding;
                 if (hasStatus || hasDetails)
                 {
-                    logicalHeight = LogicalFooterContentTop;
+                    logicalHeight = footerContentTop;
                     if (hasStatus)
                     {
                         logicalHeight += LogicalFooterLineHeight;
@@ -1006,7 +1013,7 @@ namespace CodexUsageTray
                 return;
             }
 
-            int y = LogicalFooterContentTop + (hasStatus ? LogicalFooterLineHeight : 0);
+            int y = GetLogicalFooterContentTop() + (hasStatus ? LogicalFooterLineHeight : 0);
             detailsButton.Bounds = new Rectangle(
                 ScaleMetric(10),
                 ScaleMetric(y),
@@ -1018,6 +1025,32 @@ namespace CodexUsageTray
             detailsButton.AccessibleDescription = detailsButton.AccessibleName;
             actionToolTip.SetToolTip(detailsButton, detailsButton.AccessibleName);
             detailsButton.Invalidate();
+        }
+
+        private int GetLogicalFooterContentTop()
+        {
+            return LogicalUsageTop +
+                (GetVisibleUsageRowCount() * LogicalUsageRowHeight) +
+                LogicalFooterTopGap;
+        }
+
+        private int GetVisibleUsageRowCount()
+        {
+            if (snapshot == null)
+            {
+                return 0;
+            }
+
+            int count = 0;
+            if (snapshot.Weekly != null)
+            {
+                count++;
+            }
+            if (snapshot.FiveHour != null)
+            {
+                count++;
+            }
+            return count;
         }
 
         private void ClampToWorkingArea()
