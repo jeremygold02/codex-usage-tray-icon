@@ -1,6 +1,6 @@
 # Codex Usage Tray
 
-Codex Usage Tray is a Windows tray utility for monitoring the usage limits of the account signed in to the Codex CLI. The tray icon shows the selected remaining-usage percentage, and a left-click opens a compact popup with the current plan, weekly and 5-hour remaining usage, last update time, and reset timing when available.
+Codex Usage Tray is a Windows tray utility for monitoring the usage limits of the account signed in to the Codex CLI. The tray icon shows the selected remaining-usage percentage, and a left-click opens a compact popup with the available weekly and 5-hour remaining usage, last update time, and reset timing.
 
 ![Codex Usage tray popup with expanded details](docs/images/tray-usage-details.png)
 
@@ -22,7 +22,7 @@ Each refresh starts a short-lived local `codex app-server --stdio` process and r
 
 ## Popup and details
 
-The popup opens in its compact state and shows the primary weekly and 5-hour limits. A status line appears while refreshing, when automatic checks are paused, or when the latest refresh failed.
+The popup opens in its compact state and shows each primary weekly or 5-hour limit returned by Codex. Temporarily unavailable windows are hidden; if neither window is returned, the refresh fails with a clear status instead of displaying unknown values. A status line also appears while refreshing or when automatic checks are paused.
 
 When the account response includes reset credits, a `Limit resets` control appears. Expand it to see:
 
@@ -46,6 +46,7 @@ The related Settings options can hide reset availability, reset times, or last-u
 - **Codex CLI was not found:** verify `codex --version` in Windows, install or add the CLI to `PATH`, then restart the tray app so it inherits the updated environment.
 - **Codex is not signed in:** run `codex login` as the same Windows user, then refresh again.
 - **App-server errors or timeouts:** update the Codex CLI, confirm it starts normally, and retry from the popup. The last successful snapshot remains visible after a failed refresh.
+- **No weekly or 5-hour limits returned:** retry the refresh and update the Codex CLI if the error persists. The app treats auxiliary model limits as supplemental data, not a replacement for the account's primary limits.
 - **Waiting for Codex / checks paused:** start Codex, use manual refresh, or configure an idle refresh interval in Settings.
 - **Reset expiration details are missing:** those rows appear only when Codex returns the corresponding account data and the related popup option is enabled.
 
