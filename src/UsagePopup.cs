@@ -9,7 +9,7 @@ namespace CodexUsageTray
     internal sealed class UsagePopup : Form
     {
         private const int WmDpiChanged = 0x02E0;
-        private const int LogicalWidth = 390;
+        private const int LogicalWidth = 350;
         private const int LogicalUsageTop = 43;
         private const int LogicalUsageRowHeight = 48;
         private const int LogicalFooterTopGap = 5;
