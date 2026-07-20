@@ -11,7 +11,7 @@ namespace CodexUsageTray
         private const int WmDpiChanged = 0x02E0;
         private const int LogicalWidth = 390;
         private const int LogicalUsageTop = 43;
-        private const int LogicalUsageRowHeight = 67;
+        private const int LogicalUsageRowHeight = 48;
         private const int LogicalFooterTopGap = 5;
         private const int LogicalContentBottomPadding = 2;
         private const int LogicalFooterLineHeight = 18;
@@ -519,12 +519,28 @@ namespace CodexUsageTray
             }
 
             int width = ClientSize.Width - x - ScaleMetric(14);
-            Rectangle labelBounds = new Rectangle(x, y, width, ScaleMetric(18));
+            string resetDetail = "";
+            if (settings == null || settings.ShowPopupResetTimes)
+            {
+                resetDetail = window.ResetAfterSeconds.HasValue
+                    ? "Next reset: " + TimeFormatter.FormatResetDateTime(lastUpdated, window.ResetAfterSeconds.Value) +
+                        " (" + TimeFormatter.FormatDuration(window.ResetAfterSeconds.Value) + ")"
+                    : "Next reset: ?";
+            }
+
+            Rectangle headerBounds = new Rectangle(x, y, width, ScaleMetric(18));
             TextFormatFlags singleLine = TextFormatFlags.SingleLine |
                 TextFormatFlags.VerticalCenter |
                 TextFormatFlags.NoPrefix |
                 TextFormatFlags.NoPadding;
-            TextRenderer.DrawText(graphics, label, rowLabelFont, labelBounds, textColor, singleLine);
+            DrawUsageHeader(
+                graphics,
+                label,
+                resetDetail,
+                headerBounds,
+                textColor,
+                mutedColor,
+                singleLine);
 
             Rectangle barBounds = new Rectangle(x, y + ScaleMetric(20), width, ScaleMetric(20));
             bool dark = IsDarkTheme();
@@ -571,27 +587,52 @@ namespace CodexUsageTray
                 barBounds,
                 percentColor,
                 singleLine | TextFormatFlags.HorizontalCenter);
+        }
 
-            string rightDetail = "";
-            if (settings == null || settings.ShowPopupResetTimes)
+        private void DrawUsageHeader(
+            Graphics graphics,
+            string label,
+            string resetDetail,
+            Rectangle bounds,
+            Color textColor,
+            Color mutedColor,
+            TextFormatFlags flags)
+        {
+            Size labelSize = TextRenderer.MeasureText(
+                graphics,
+                label,
+                rowLabelFont,
+                new Size(32767, bounds.Height),
+                flags);
+            int labelWidth = Math.Min(bounds.Width, labelSize.Width);
+            Rectangle labelBounds = new Rectangle(bounds.X, bounds.Y, labelWidth, bounds.Height);
+            TextRenderer.DrawText(
+                graphics,
+                label,
+                rowLabelFont,
+                labelBounds,
+                textColor,
+                flags | TextFormatFlags.EndEllipsis);
+
+            if (string.IsNullOrEmpty(resetDetail))
             {
-                rightDetail = window.ResetAfterSeconds.HasValue
-                    ? "Next reset: " + TimeFormatter.FormatResetDateTime(lastUpdated, window.ResetAfterSeconds.Value) +
-                        " (" + TimeFormatter.FormatDuration(window.ResetAfterSeconds.Value) + ")"
-                    : "Next reset: ?";
+                return;
             }
 
-            Rectangle detailBounds = new Rectangle(
-                x,
-                y + ScaleMetric(43),
-                width,
-                ScaleMetric(17));
-            DrawMeasuredDetails(
+            int gap = ScaleMetric(12);
+            int resetLeft = Math.Min(bounds.Right, labelBounds.Right + gap);
+            Rectangle resetBounds = new Rectangle(
+                resetLeft,
+                bounds.Y,
+                Math.Max(0, bounds.Right - resetLeft),
+                bounds.Height);
+            TextRenderer.DrawText(
                 graphics,
-                "",
-                rightDetail,
-                detailBounds,
-                mutedColor);
+                resetDetail,
+                detailFont,
+                resetBounds,
+                mutedColor,
+                flags | TextFormatFlags.Right | TextFormatFlags.EndEllipsis);
         }
 
         private void DrawMeasuredDetails(
