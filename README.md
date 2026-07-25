@@ -38,6 +38,7 @@ The related Settings options can hide reset availability, reset times, or last-u
 - Automatic refresh defaults to every 300 seconds while Codex is running and can be set from 30 to 3600 seconds.
 - Idle refresh defaults to off. When no Codex process is running, automatic checks pause unless an idle interval is configured; manual refresh remains available.
 - A failed refresh keeps the last successful values visible and marks them as stale instead of replacing them with empty data.
+- The first successful refresh that observes a weekly or 5-hour limit return to 100% shows one reset notification. Startup-at-100, stale refreshes, and brief 99%-to-100% jitter do not produce duplicate alerts.
 - Open Settings from the popup gear or tray menu. Changes are saved only when **OK** is selected and immediately update the icon, popup, notifications, startup behavior, and refresh schedule as applicable.
 - Settings also provides theme and tray appearance controls, threshold notifications, popup visibility options, Windows startup, and update checks.
 

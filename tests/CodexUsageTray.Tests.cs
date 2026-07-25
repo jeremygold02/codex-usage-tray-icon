@@ -21,6 +21,7 @@ namespace CodexUsageTray.Tests
             TestMissingPrimaryLimits();
             TestRpcErrors();
             TestDeepClone();
+            TestUsageResetDetection();
 
             if (failures != 0)
             {
@@ -157,6 +158,112 @@ namespace CodexUsageTray.Tests
             AssertEqual(25, original.FiveHour.UsedPercent, "primary window clone is independent");
             AssertEqual(50, original.AdditionalLimits[0].Weekly.UsedPercent, "additional window clone is independent");
             AssertEqual("Original reset", original.AvailableResets[0].Title, "reset clone is independent");
+        }
+
+        private static void TestUsageResetDetection()
+        {
+            UsageResetDetector startupFull = new UsageResetDetector();
+            AssertReset(
+                UsageResetKind.None,
+                startupFull.Observe(CreateSnapshot(100, 100)),
+                "startup at full usage is silent");
+            AssertReset(
+                UsageResetKind.None,
+                startupFull.Observe(CreateSnapshot(100, 100)),
+                "repeated full usage is silent");
+            startupFull.Observe(CreateSnapshot(99, 100));
+            AssertReset(
+                UsageResetKind.None,
+                startupFull.Observe(CreateSnapshot(100, 100)),
+                "one startup-cycle 99 percent sample is treated as jitter");
+
+            UsageResetDetector independentWindows = new UsageResetDetector();
+            AssertReset(
+                UsageResetKind.None,
+                independentWindows.Observe(CreateSnapshot(72, 45)),
+                "initial below-full usage establishes a baseline");
+            AssertReset(
+                UsageResetKind.Weekly,
+                independentWindows.Observe(CreateSnapshot(100, 40)),
+                "weekly reset is detected independently");
+            AssertReset(
+                UsageResetKind.None,
+                independentWindows.Observe(CreateSnapshot(100, 40)),
+                "weekly reset notification is not duplicated");
+            AssertReset(
+                UsageResetKind.FiveHour,
+                independentWindows.Observe(CreateSnapshot(100, 100)),
+                "5-hour reset is detected independently");
+
+            UsageResetDetector combinedReset = new UsageResetDetector();
+            combinedReset.Observe(CreateSnapshot(60, 70));
+            AssertReset(
+                UsageResetKind.Weekly | UsageResetKind.FiveHour,
+                combinedReset.Observe(CreateSnapshot(100, 100)),
+                "simultaneous resets are combined");
+
+            UsageResetDetector missingWindow = new UsageResetDetector();
+            missingWindow.Observe(CreateSnapshot(80, null));
+            missingWindow.Observe(CreateSnapshot(null, null));
+            AssertReset(
+                UsageResetKind.Weekly,
+                missingWindow.Observe(CreateSnapshot(100, null)),
+                "missing windows preserve reset state");
+
+            UsageResetDetector jitterSuppression = new UsageResetDetector();
+            jitterSuppression.Observe(CreateSnapshot(50, null));
+            AssertReset(
+                UsageResetKind.Weekly,
+                jitterSuppression.Observe(CreateSnapshot(100, null)),
+                "first reset is detected");
+            AssertReset(
+                UsageResetKind.None,
+                jitterSuppression.Observe(CreateSnapshot(99, null)),
+                "one 99 percent sample does not immediately rearm");
+            AssertReset(
+                UsageResetKind.None,
+                jitterSuppression.Observe(CreateSnapshot(100, null)),
+                "99 to 100 jitter does not duplicate a notification");
+            jitterSuppression.Observe(CreateSnapshot(99, null));
+            jitterSuppression.Observe(CreateSnapshot(99, null));
+            AssertReset(
+                UsageResetKind.Weekly,
+                jitterSuppression.Observe(CreateSnapshot(100, null)),
+                "stable below-full usage rearms detection");
+
+            UsageResetDetector immediateRearm = new UsageResetDetector();
+            immediateRearm.Observe(CreateSnapshot(50, null));
+            immediateRearm.Observe(CreateSnapshot(100, null));
+            immediateRearm.Observe(CreateSnapshot(98, null));
+            AssertReset(
+                UsageResetKind.Weekly,
+                immediateRearm.Observe(CreateSnapshot(100, null)),
+                "98 percent usage rearms detection immediately");
+        }
+
+        private static UsageSnapshot CreateSnapshot(int? weeklyRemaining, int? fiveHourRemaining)
+        {
+            UsageSnapshot snapshot = new UsageSnapshot();
+            snapshot.Weekly = CreateWindow(weeklyRemaining);
+            snapshot.FiveHour = CreateWindow(fiveHourRemaining);
+            return snapshot;
+        }
+
+        private static LimitWindow CreateWindow(int? remaining)
+        {
+            if (!remaining.HasValue)
+            {
+                return null;
+            }
+
+            LimitWindow window = new LimitWindow();
+            window.UsedPercent = 100 - remaining.Value;
+            return window;
+        }
+
+        private static void AssertReset(UsageResetKind expected, UsageResetKind actual, string name)
+        {
+            AssertEqual((int)expected, (int)actual, name);
         }
 
         private static void AssertTrue(bool condition, string name)

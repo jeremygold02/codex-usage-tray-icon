@@ -36,6 +36,7 @@ namespace CodexUsageTray
         private readonly AppSettings settings;
         private readonly Stopwatch refreshClock;
         private readonly CancellationTokenSource shutdownCancellation;
+        private readonly UsageResetDetector usageResetDetector;
         private readonly bool showUsageOnStart;
         private readonly bool showSettingsOnStart;
 
@@ -71,6 +72,7 @@ namespace CodexUsageTray
             showSettingsOnStart = HasArg(args, "--show-settings");
             refreshClock = Stopwatch.StartNew();
             shutdownCancellation = new CancellationTokenSource();
+            usageResetDetector = new UsageResetDetector();
             dispatcher = new Control();
             dispatcher.CreateControl();
             settings = AppSettings.Load();
@@ -434,9 +436,15 @@ namespace CodexUsageTray
             snapshot.IsRefreshing = false;
             snapshot.IsPaused = false;
 
+            UsageResetKind resets = usageResetDetector.Observe(snapshot);
             lastSuccessfulSnapshot = snapshot.Clone();
             currentSnapshot = snapshot.Clone();
-            RenderDataSnapshot(currentSnapshot, true, true, showBalloon);
+            RenderDataSnapshot(
+                currentSnapshot,
+                true,
+                true,
+                showBalloon && resets == UsageResetKind.None);
+            ShowUsageResetNotification(resets);
         }
 
         private void ApplyRefreshFailure(UsageSnapshot failure, bool showBalloon)
@@ -846,6 +854,36 @@ namespace CodexUsageTray
                 message.ToString(),
                 ToolTipIcon.Warning);
             return true;
+        }
+
+        private void ShowUsageResetNotification(UsageResetKind resets)
+        {
+            if (resets == UsageResetKind.None)
+            {
+                return;
+            }
+
+            bool weekly = (resets & UsageResetKind.Weekly) != 0;
+            bool fiveHour = (resets & UsageResetKind.FiveHour) != 0;
+            string message;
+            if (weekly && fiveHour)
+            {
+                message = "Weekly and 5-hour usage are back to 100%.";
+            }
+            else if (weekly)
+            {
+                message = "Weekly usage is back to 100%.";
+            }
+            else
+            {
+                message = "5-hour usage is back to 100%.";
+            }
+
+            notifyIcon.ShowBalloonTip(
+                5000,
+                "Codex Usage Reset",
+                message,
+                ToolTipIcon.Info);
         }
 
         private int GetThresholdLevel(LimitWindow window)

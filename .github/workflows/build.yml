@@ -142,7 +142,8 @@ jobs:
             src\RateLimitResetCredit.cs `
             src\UsageSnapshot.cs `
             src\UsageLimitSet.cs `
-            src\LimitWindow.cs
+            src\LimitWindow.cs `
+            src\UsageResetDetector.cs
           if ($LASTEXITCODE -ne 0) {
             throw "Test compilation failed with exit code $LASTEXITCODE."
           }
