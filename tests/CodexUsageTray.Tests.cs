@@ -20,8 +20,10 @@ namespace CodexUsageTray.Tests
             TestPartialPrimaryLimits();
             TestMissingPrimaryLimits();
             TestRpcErrors();
+            TestResetCreditRedemptionResponses();
             TestDeepClone();
             TestUsageResetDetection();
+            TestAutomaticResetRedemptionPolicy();
 
             if (failures != 0)
             {
@@ -55,6 +57,11 @@ namespace CodexUsageTray.Tests
                 "Full reset (Weekly + 5 hr)",
                 snapshot.AvailableResets[0].Title,
                 "reset title");
+            AssertEqual("credit-1", snapshot.AvailableResets[0].Id, "reset credit ID");
+            AssertEqual(
+                "codexRateLimits",
+                snapshot.AvailableResets[0].ResetType,
+                "reset credit type");
             AssertTrue(snapshot.AvailableResets[0].ExpiresAtUtc.HasValue, "reset expiration parses");
             AssertTrue(
                 snapshot.AvailableResets[0].ExpiresAtUtc.Value.Kind == DateTimeKind.Utc,
@@ -146,6 +153,8 @@ namespace CodexUsageTray.Tests
             additional.Weekly.UsedPercent = 50;
             original.AdditionalLimits.Add(additional);
             RateLimitResetCredit reset = new RateLimitResetCredit();
+            reset.Id = "original-id";
+            reset.ResetType = "codexRateLimits";
             reset.Title = "Original reset";
             reset.ExpiresAtUtc = new DateTime(2026, 7, 11, 18, 0, 0, DateTimeKind.Utc);
             original.AvailableResets.Add(reset);
@@ -153,11 +162,57 @@ namespace CodexUsageTray.Tests
             UsageSnapshot clone = original.Clone();
             clone.FiveHour.UsedPercent = 75;
             clone.AdditionalLimits[0].Weekly.UsedPercent = 80;
+            clone.AvailableResets[0].Id = "changed-id";
             clone.AvailableResets[0].Title = "Changed reset";
 
             AssertEqual(25, original.FiveHour.UsedPercent, "primary window clone is independent");
             AssertEqual(50, original.AdditionalLimits[0].Weekly.UsedPercent, "additional window clone is independent");
+            AssertEqual("original-id", original.AvailableResets[0].Id, "reset ID clone is independent");
             AssertEqual("Original reset", original.AvailableResets[0].Title, "reset clone is independent");
+        }
+
+        private static void TestResetCreditRedemptionResponses()
+        {
+            AssertRedemptionOutcome(
+                ResetCreditRedemptionOutcome.Reset,
+                CodexRateLimitClient.ParseResetCreditRedemptionResponse(
+                    "{\"result\":{\"outcome\":\"reset\"}}"),
+                "reset redemption outcome");
+            AssertRedemptionOutcome(
+                ResetCreditRedemptionOutcome.AlreadyRedeemed,
+                CodexRateLimitClient.ParseResetCreditRedemptionResponse(
+                    "{\"result\":{\"outcome\":\"alreadyRedeemed\"}}"),
+                "already-redeemed outcome");
+            AssertRedemptionOutcome(
+                ResetCreditRedemptionOutcome.NothingToReset,
+                CodexRateLimitClient.ParseResetCreditRedemptionResponse(
+                    "{\"result\":{\"outcome\":\"nothingToReset\"}}"),
+                "nothing-to-reset outcome");
+            AssertRedemptionOutcome(
+                ResetCreditRedemptionOutcome.NoCredit,
+                CodexRateLimitClient.ParseResetCreditRedemptionResponse(
+                    "{\"result\":{\"outcome\":\"noCredit\"}}"),
+                "no-credit outcome");
+
+            ResetCreditRedemptionResult authentication =
+                CodexRateLimitClient.ParseResetCreditRedemptionResponse(
+                    "{\"error\":{\"message\":\"401 unauthorized\"}}");
+            AssertRedemptionOutcome(
+                ResetCreditRedemptionOutcome.Failed,
+                authentication,
+                "redemption authentication failure");
+            AssertContains(
+                authentication.ErrorMessage,
+                "codex login",
+                "redemption authentication guidance");
+
+            ResetCreditRedemptionResult unknown =
+                CodexRateLimitClient.ParseResetCreditRedemptionResponse(
+                    "{\"result\":{\"outcome\":\"futureOutcome\"}}");
+            AssertRedemptionOutcome(
+                ResetCreditRedemptionOutcome.Failed,
+                unknown,
+                "unknown redemption outcome");
         }
 
         private static void TestUsageResetDetection()
@@ -241,6 +296,57 @@ namespace CodexUsageTray.Tests
                 "98 percent usage rearms detection immediately");
         }
 
+        private static void TestAutomaticResetRedemptionPolicy()
+        {
+            DateTime nowUtc = new DateTime(2026, 7, 26, 16, 0, 0, DateTimeKind.Utc);
+            UsageSnapshot snapshot = CreateSnapshot(75, 100);
+            snapshot.AvailableResets.Add(
+                CreateCredit("unsupported", "otherReset", nowUtc.AddMinutes(1)));
+            snapshot.AvailableResets.Add(
+                CreateCredit("outside-window", "codexRateLimits", nowUtc.AddMinutes(6)));
+            snapshot.AvailableResets.Add(
+                CreateCredit("eligible", "codex_rate_limits", nowUtc.AddMinutes(4)));
+
+            RateLimitResetCredit selected =
+                AutomaticResetRedemptionPolicy.FindEligibleCredit(
+                    snapshot,
+                    nowUtc,
+                    5,
+                    null);
+            AssertTrue(selected != null, "eligible expiring reset is selected");
+            AssertEqual("eligible", selected != null ? selected.Id : null, "earliest eligible reset");
+
+            RateLimitResetCredit excluded =
+                AutomaticResetRedemptionPolicy.FindEligibleCredit(
+                    snapshot,
+                    nowUtc,
+                    5,
+                    "eligible");
+            AssertTrue(excluded == null, "completed reset is excluded");
+
+            UsageSnapshot fullUsage = CreateSnapshot(100, 100);
+            fullUsage.AvailableResets.Add(
+                CreateCredit("unused", "codexRateLimits", nowUtc.AddMinutes(1)));
+            AssertTrue(
+                AutomaticResetRedemptionPolicy.FindEligibleCredit(
+                    fullUsage,
+                    nowUtc,
+                    5,
+                    null) == null,
+                "full usage does not consume a reset");
+
+            DateTime? nextCheckUtc =
+                AutomaticResetRedemptionPolicy.GetNextCheckUtc(
+                    snapshot,
+                    nowUtc,
+                    5,
+                    "eligible");
+            AssertTrue(nextCheckUtc.HasValue, "future reset schedules an expiry check");
+            AssertTrue(
+                nextCheckUtc.GetValueOrDefault() == nowUtc.AddMinutes(1),
+                "expiry check uses the configured lead time");
+        }
+
         private static UsageSnapshot CreateSnapshot(int? weeklyRemaining, int? fiveHourRemaining)
         {
             UsageSnapshot snapshot = new UsageSnapshot();
@@ -261,9 +367,33 @@ namespace CodexUsageTray.Tests
             return window;
         }
 
+        private static RateLimitResetCredit CreateCredit(
+            string id,
+            string resetType,
+            DateTime expiresAtUtc)
+        {
+            RateLimitResetCredit credit = new RateLimitResetCredit();
+            credit.Id = id;
+            credit.ResetType = resetType;
+            credit.ExpiresAtUtc = expiresAtUtc;
+            return credit;
+        }
+
         private static void AssertReset(UsageResetKind expected, UsageResetKind actual, string name)
         {
             AssertEqual((int)expected, (int)actual, name);
+        }
+
+        private static void AssertRedemptionOutcome(
+            ResetCreditRedemptionOutcome expected,
+            ResetCreditRedemptionResult actual,
+            string name)
+        {
+            AssertTrue(actual != null, name + " returns a result");
+            if (actual != null)
+            {
+                AssertEqual((int)expected, (int)actual.Outcome, name);
+            }
         }
 
         private static void AssertTrue(bool condition, string name)

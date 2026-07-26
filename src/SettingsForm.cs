@@ -14,6 +14,7 @@ namespace CodexUsageTray
         private NumericUpDown lowNumeric;
         private NumericUpDown refreshNumeric;
         private NumericUpDown idleRefreshNumeric;
+        private NumericUpDown autoRedeemLeadNumeric;
         private NumericUpDown previewPercentNumeric;
         private RadioButton weeklyRadio;
         private RadioButton fiveHourRadio;
@@ -23,6 +24,7 @@ namespace CodexUsageTray
         private CheckBox showResetAvailabilityCheckBox;
         private CheckBox startWithWindowsCheckBox;
         private CheckBox thresholdNotificationsCheckBox;
+        private CheckBox autoRedeemResetCreditsCheckBox;
         private CheckBox showTrayBoxCheckBox;
         private PictureBox trayPreview;
         private Button trayBoxColorButton;
@@ -34,6 +36,7 @@ namespace CodexUsageTray
         private Label contrastStatusLabel;
         private Label updateStatusLabel;
         private Control thresholdControls;
+        private Control autoRedeemTimingControls;
         private Control trayBackgroundControls;
         private bool useCustomTrayBoxColor;
         private Color trayBoxColor;
@@ -57,8 +60,8 @@ namespace CodexUsageTray
             toolTip.ShowAlways = true;
 
             Text = "Codex Usage Tray Settings";
-            ClientSize = new Size(384, 561);
-            MinimumSize = new Size(400, 600);
+            ClientSize = new Size(440, 605);
+            MinimumSize = new Size(456, 644);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -119,7 +122,7 @@ namespace CodexUsageTray
             mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             mainLayout.Dock = DockStyle.Fill;
-            mainLayout.Padding = new Padding(8);
+            mainLayout.Padding = new Padding(10);
             mainLayout.Margin = Padding.Empty;
 
             mainLayout.Controls.Add(BuildUsageGroup(), 0, 0);
@@ -198,6 +201,10 @@ namespace CodexUsageTray
             metricRow.Controls.Add(metricOptions, 1, 0);
             layout.Controls.Add(metricRow, 0, 0);
 
+            TableLayoutPanel alertOptions = CreateGroupLayout(2);
+            alertOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42.0F));
+            alertOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58.0F));
+
             thresholdNotificationsCheckBox = CreateCheckBox(
                 "&Usage threshold alerts",
                 "Usage threshold alerts");
@@ -205,7 +212,33 @@ namespace CodexUsageTray
             toolTip.SetToolTip(
                 thresholdNotificationsCheckBox,
                 "Show an alert when remaining usage first reaches the low or critical threshold.");
-            layout.Controls.Add(thresholdNotificationsCheckBox, 0, 1);
+            alertOptions.Controls.Add(thresholdNotificationsCheckBox, 0, 0);
+
+            FlowLayoutPanel autoRedeemOptions = CreateFlowLayout();
+            autoRedeemResetCreditsCheckBox = CreateCheckBox(
+                "&Auto-use resets",
+                "Automatically use expiring limit resets");
+            autoRedeemResetCreditsCheckBox.Margin = new Padding(3, 3, 2, 1);
+            autoRedeemOptions.Controls.Add(autoRedeemResetCreditsCheckBox);
+
+            FlowLayoutPanel autoRedeemTiming = CreateFlowLayout();
+            autoRedeemLeadNumeric = CreateNumeric(
+                1,
+                120,
+                44,
+                "Minutes before reset credit expiration");
+            autoRedeemTiming.Controls.Add(autoRedeemLeadNumeric);
+            autoRedeemTiming.Controls.Add(CreateSuffixLabel("min"));
+            autoRedeemTimingControls = autoRedeemTiming;
+            autoRedeemOptions.Controls.Add(autoRedeemTiming);
+            toolTip.SetToolTip(
+                autoRedeemResetCreditsCheckBox,
+                "Use an available Codex reset credit shortly before it expires, but only when there is usage to reset.");
+            toolTip.SetToolTip(
+                autoRedeemLeadNumeric,
+                "How many minutes before expiration automatic redemption may begin.");
+            alertOptions.Controls.Add(autoRedeemOptions, 1, 0);
+            layout.Controls.Add(alertOptions, 0, 1);
 
             FlowLayoutPanel thresholdRow = CreateFlowLayout();
             thresholdRow.Margin = new Padding(18, 0, 0, 1);
@@ -461,6 +494,7 @@ namespace CodexUsageTray
             SetNumericValue(lowNumeric, settings.LowThreshold);
             SetNumericValue(refreshNumeric, settings.RefreshSeconds);
             SetNumericValue(idleRefreshNumeric, settings.IdleRefreshSeconds);
+            SetNumericValue(autoRedeemLeadNumeric, settings.AutoRedeemLeadMinutes);
             EnsureValidValues();
 
             weeklyRadio.Checked = !string.Equals(
@@ -477,6 +511,7 @@ namespace CodexUsageTray
             showResetAvailabilityCheckBox.Checked = settings.ShowResetAvailability;
             startWithWindowsCheckBox.Checked = StartupManager.IsEnabled();
             thresholdNotificationsCheckBox.Checked = settings.ThresholdNotifications;
+            autoRedeemResetCreditsCheckBox.Checked = settings.AutoRedeemResetCredits;
             showTrayBoxCheckBox.Checked = settings.ShowTrayBox;
             useCustomTrayBoxColor = settings.UseCustomTrayBoxColor;
             trayBoxColor = settings.GetTrayBoxColor();
@@ -555,6 +590,7 @@ namespace CodexUsageTray
                 }
             };
             thresholdNotificationsCheckBox.CheckedChanged += delegate { UpdateDependentControlStates(); };
+            autoRedeemResetCreditsCheckBox.CheckedChanged += delegate { UpdateDependentControlStates(); };
             showTrayBoxCheckBox.CheckedChanged += delegate
             {
                 UpdateDependentControlStates();
@@ -589,6 +625,8 @@ namespace CodexUsageTray
             candidate.ShowResetAvailability = showResetAvailabilityCheckBox.Checked;
             candidate.StartWithWindows = startWithWindowsCheckBox.Checked;
             candidate.ThresholdNotifications = thresholdNotificationsCheckBox.Checked;
+            candidate.AutoRedeemResetCredits = autoRedeemResetCreditsCheckBox.Checked;
+            candidate.AutoRedeemLeadMinutes = (int)autoRedeemLeadNumeric.Value;
             candidate.ShowTrayBox = showTrayBoxCheckBox.Checked;
             candidate.UseCustomTrayBoxColor = useCustomTrayBoxColor;
             candidate.TrayBoxColor = AppSettings.FormatColor(trayBoxColor);
@@ -638,6 +676,8 @@ namespace CodexUsageTray
             showResetAvailabilityCheckBox.Checked = defaults.ShowResetAvailability;
             startWithWindowsCheckBox.Checked = defaults.StartWithWindows;
             thresholdNotificationsCheckBox.Checked = defaults.ThresholdNotifications;
+            autoRedeemResetCreditsCheckBox.Checked = defaults.AutoRedeemResetCredits;
+            autoRedeemLeadNumeric.Value = defaults.AutoRedeemLeadMinutes;
             showTrayBoxCheckBox.Checked = defaults.ShowTrayBox;
             useCustomTrayBoxColor = defaults.UseCustomTrayBoxColor;
             trayBoxColor = defaults.GetTrayBoxColor();
@@ -655,6 +695,10 @@ namespace CodexUsageTray
             if (thresholdControls != null)
             {
                 thresholdControls.Enabled = thresholdNotificationsCheckBox.Checked;
+            }
+            if (autoRedeemTimingControls != null)
+            {
+                autoRedeemTimingControls.Enabled = autoRedeemResetCreditsCheckBox.Checked;
             }
             if (trayBackgroundControls != null)
             {
@@ -997,8 +1041,8 @@ namespace CodexUsageTray
             group.AutoSize = true;
             group.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             group.Dock = DockStyle.Fill;
-            group.Margin = new Padding(0, 0, 0, 4);
-            group.Padding = new Padding(7, 3, 7, 5);
+            group.Margin = new Padding(0, 0, 0, 6);
+            group.Padding = new Padding(8, 4, 8, 7);
             group.Text = text;
             return group;
         }
@@ -1034,7 +1078,7 @@ namespace CodexUsageTray
             label.AccessibleName = accessibleName;
             label.Anchor = AnchorStyles.Left;
             label.AutoSize = true;
-            label.Margin = new Padding(3, 3, 3, 1);
+            label.Margin = new Padding(3, 4, 5, 2);
             label.Text = text;
             label.UseMnemonic = true;
             return label;
@@ -1045,7 +1089,7 @@ namespace CodexUsageTray
             Label label = new Label();
             label.Anchor = AnchorStyles.Left;
             label.AutoSize = true;
-            label.Margin = new Padding(0, 3, 3, 1);
+            label.Margin = new Padding(0, 4, 4, 2);
             label.Text = text;
             label.UseMnemonic = false;
             return label;
@@ -1068,7 +1112,7 @@ namespace CodexUsageTray
             checkBox.AccessibleName = accessibleName;
             checkBox.Anchor = AnchorStyles.Left;
             checkBox.AutoSize = true;
-            checkBox.Margin = new Padding(3, 1, 3, 1);
+            checkBox.Margin = new Padding(3, 2, 5, 2);
             checkBox.Text = text;
             checkBox.UseMnemonic = true;
             return checkBox;
@@ -1080,7 +1124,7 @@ namespace CodexUsageTray
             radio.AccessibleName = accessibleName;
             radio.Anchor = AnchorStyles.Left;
             radio.AutoSize = true;
-            radio.Margin = new Padding(3, 1, 7, 1);
+            radio.Margin = new Padding(3, 2, 9, 2);
             radio.Text = text;
             radio.UseMnemonic = true;
             return radio;
@@ -1095,7 +1139,7 @@ namespace CodexUsageTray
             NumericUpDown numeric = new NumericUpDown();
             numeric.AccessibleName = accessibleName;
             numeric.Anchor = AnchorStyles.Left;
-            numeric.Margin = new Padding(3, 1, 3, 1);
+            numeric.Margin = new Padding(3, 2, 3, 2);
             numeric.Minimum = minimum;
             numeric.Maximum = maximum;
             numeric.Size = new Size(width, 23);

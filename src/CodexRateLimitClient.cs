@@ -36,128 +36,51 @@ namespace CodexUsageTray
             EndOfStream
         }
 
+        private delegate void AppServerRequestSender(
+            StreamWriter input,
+            JavaScriptSerializer serializer);
+
         public static UsageSnapshot FetchUsage()
         {
             DateTime attemptedAt = DateTime.Now;
-            string codexCommand = ResolveCodexCommand();
-            if (string.IsNullOrEmpty(codexCommand))
+            AppServerRequestResult request = ExecuteAppServerRequest(SendRateLimitRequest);
+            if (!request.IsSuccess)
             {
-                return FromClassifiedError(FetchErrorKind.CommandNotFound, attemptedAt);
-            }
-
-            Process process = null;
-            ProcessOutputBuffer output = null;
-            ProcessErrorHints errorHints = null;
-            bool processStarted = false;
-            bool rateLimitRequestSent = false;
-
-            try
-            {
-                JavaScriptSerializer serializer = CreateSerializer();
-                process = new Process();
-                process.StartInfo = CreateStartInfo(codexCommand);
-                output = new ProcessOutputBuffer();
-                errorHints = new ProcessErrorHints();
-                process.OutputDataReceived += output.HandleDataReceived;
-                process.ErrorDataReceived += errorHints.HandleDataReceived;
-
-                if (!process.Start())
-                {
-                    return FromClassifiedError(FetchErrorKind.StartFailed, attemptedAt);
-                }
-
-                processStarted = true;
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-
-                Stopwatch timer = Stopwatch.StartNew();
-                SendInitialize(process.StandardInput, serializer);
-
-                Dictionary<string, object> initializeResponse;
-                ResponseWaitResult initializeWait = WaitForResponse(
-                    process,
-                    output,
-                    serializer,
-                    timer,
-                    1,
-                    out initializeResponse);
-                if (initializeWait != ResponseWaitResult.Success)
-                {
-                    return FromWaitError(initializeWait, errorHints, attemptedAt);
-                }
-
-                Dictionary<string, object> initializeError;
-                if (TryGetDictionary(initializeResponse, "error", out initializeError))
-                {
-                    return FromRpcError(initializeError, attemptedAt);
-                }
-
-                Dictionary<string, object> initializeResult;
-                if (!TryGetDictionary(initializeResponse, "result", out initializeResult))
-                {
-                    return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
-                }
-
-                SendInitialized(process.StandardInput, serializer);
-                SendRateLimitRequest(process.StandardInput, serializer);
-                rateLimitRequestSent = true;
-
-                Dictionary<string, object> rateLimitResponse;
-                ResponseWaitResult rateLimitWait = WaitForResponse(
-                    process,
-                    output,
-                    serializer,
-                    timer,
-                    2,
-                    out rateLimitResponse);
-                if (rateLimitWait != ResponseWaitResult.Success)
-                {
-                    return FromWaitError(rateLimitWait, errorHints, attemptedAt);
-                }
-
-                CloseStandardInput(process);
-
-                Dictionary<string, object> rateLimitError;
-                if (TryGetDictionary(rateLimitResponse, "error", out rateLimitError))
-                {
-                    return FromRpcError(rateLimitError, attemptedAt);
-                }
-
-                return ParseRateLimitsResponse(rateLimitResponse, attemptedAt);
-            }
-            catch (Exception)
-            {
-                if (errorHints != null && errorHints.AuthenticationRequired)
-                {
-                    return FromClassifiedError(FetchErrorKind.AuthenticationRequired, attemptedAt);
-                }
-
                 return FromClassifiedError(
-                    rateLimitRequestSent ? FetchErrorKind.ExitedEarly : FetchErrorKind.StartFailed,
+                    request.ErrorKind,
                     attemptedAt);
             }
-            finally
-            {
-                CloseStandardInput(process);
-                StopProcess(process, processStarted);
 
-                if (process != null && output != null)
-                {
-                    process.OutputDataReceived -= output.HandleDataReceived;
-                }
-                if (process != null && errorHints != null)
-                {
-                    process.ErrorDataReceived -= errorHints.HandleDataReceived;
-                }
-                if (output != null)
-                {
-                    output.Dispose();
-                }
-                if (process != null)
-                {
-                    process.Dispose();
-                }
+            return ParseRateLimitsResponse(request.Response, attemptedAt);
+        }
+
+        public static ResetCreditRedemptionResult ConsumeResetCredit(
+            string creditId,
+            string idempotencyKey)
+        {
+            if (string.IsNullOrWhiteSpace(creditId))
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "The reset credit did not include an ID.");
             }
+            if (string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "The reset request did not include an idempotency key.");
+            }
+
+            AppServerRequestResult request = ExecuteAppServerRequest(
+                delegate(StreamWriter input, JavaScriptSerializer serializer)
+                {
+                    SendResetCreditRequest(input, serializer, creditId, idempotencyKey);
+                });
+            if (!request.IsSuccess)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    GetRedemptionFailureMessage(request.ErrorKind));
+            }
+
+            return ParseResetCreditRedemptionResponse(request.Response);
         }
 
         internal static UsageSnapshot ParseRateLimitsResponse(string json)
@@ -191,6 +114,88 @@ namespace CodexUsageTray
             {
                 return FromClassifiedError(FetchErrorKind.InvalidResponse, attemptedAt);
             }
+        }
+
+        internal static ResetCreditRedemptionResult ParseResetCreditRedemptionResponse(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "Codex returned no reset result.");
+            }
+
+            try
+            {
+                object rootObject = CreateSerializer().DeserializeObject(json);
+                Dictionary<string, object> root = rootObject as Dictionary<string, object>;
+                return root != null
+                    ? ParseResetCreditRedemptionResponse(root)
+                    : ResetCreditRedemptionResult.FromError(
+                        "Codex returned invalid reset data.");
+            }
+            catch (ArgumentException)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "Codex returned invalid reset data.");
+            }
+            catch (InvalidOperationException)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "Codex returned invalid reset data.");
+            }
+        }
+
+        private static ResetCreditRedemptionResult ParseResetCreditRedemptionResponse(
+            Dictionary<string, object> response)
+        {
+            Dictionary<string, object> error;
+            if (TryGetDictionary(response, "error", out error))
+            {
+                string message = GetOptionalString(error, "message");
+                if (IsAuthenticationMessage(message))
+                {
+                    return ResetCreditRedemptionResult.FromError(
+                        "Codex is not signed in. Run codex login.");
+                }
+
+                string detail = CompactErrorDetail(message, 160);
+                return ResetCreditRedemptionResult.FromError(
+                    string.IsNullOrEmpty(detail)
+                        ? "Codex rejected the reset request."
+                        : "Codex rejected the reset request: " + detail);
+            }
+
+            Dictionary<string, object> result;
+            if (!TryGetDictionary(response, "result", out result))
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "Codex returned invalid reset data.");
+            }
+
+            string outcome = GetOptionalString(result, "outcome");
+            if (string.Equals(outcome, "reset", StringComparison.OrdinalIgnoreCase))
+            {
+                return ResetCreditRedemptionResult.FromOutcome(
+                    ResetCreditRedemptionOutcome.Reset);
+            }
+            if (string.Equals(outcome, "alreadyRedeemed", StringComparison.OrdinalIgnoreCase))
+            {
+                return ResetCreditRedemptionResult.FromOutcome(
+                    ResetCreditRedemptionOutcome.AlreadyRedeemed);
+            }
+            if (string.Equals(outcome, "nothingToReset", StringComparison.OrdinalIgnoreCase))
+            {
+                return ResetCreditRedemptionResult.FromOutcome(
+                    ResetCreditRedemptionOutcome.NothingToReset);
+            }
+            if (string.Equals(outcome, "noCredit", StringComparison.OrdinalIgnoreCase))
+            {
+                return ResetCreditRedemptionResult.FromOutcome(
+                    ResetCreditRedemptionOutcome.NoCredit);
+            }
+
+            return ResetCreditRedemptionResult.FromError(
+                "Codex returned an unrecognized reset result.");
         }
 
         private static UsageSnapshot ParseRateLimitsResponse(
@@ -489,6 +494,8 @@ namespace CodexUsageTray
                 }
 
                 RateLimitResetCredit credit = new RateLimitResetCredit();
+                credit.Id = GetOptionalString(values, "id");
+                credit.ResetType = GetOptionalString(values, "resetType");
                 credit.Title = GetOptionalString(values, "title");
 
                 object expiresAtObject;
@@ -669,6 +676,23 @@ namespace CodexUsageTray
             SendMessage(input, serializer, request);
         }
 
+        private static void SendResetCreditRequest(
+            StreamWriter input,
+            JavaScriptSerializer serializer,
+            string creditId,
+            string idempotencyKey)
+        {
+            Dictionary<string, object> parameters = new Dictionary<string, object>();
+            parameters["idempotencyKey"] = idempotencyKey;
+            parameters["creditId"] = creditId;
+
+            Dictionary<string, object> request = new Dictionary<string, object>();
+            request["id"] = 2;
+            request["method"] = "account/rateLimitResetCredit/consume";
+            request["params"] = parameters;
+            SendMessage(input, serializer, request);
+        }
+
         private static void SendMessage(
             StreamWriter input,
             JavaScriptSerializer serializer,
@@ -824,21 +848,18 @@ namespace CodexUsageTray
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
         }
 
-        private static UsageSnapshot FromWaitError(
+        private static FetchErrorKind GetWaitErrorKind(
             ResponseWaitResult waitResult,
-            ProcessErrorHints errorHints,
-            DateTime attemptedAt)
+            ProcessErrorHints errorHints)
         {
             if (errorHints != null && errorHints.AuthenticationRequired)
             {
-                return FromClassifiedError(FetchErrorKind.AuthenticationRequired, attemptedAt);
+                return FetchErrorKind.AuthenticationRequired;
             }
 
-            return FromClassifiedError(
-                waitResult == ResponseWaitResult.TimedOut
-                    ? FetchErrorKind.TimedOut
-                    : FetchErrorKind.ExitedEarly,
-                attemptedAt);
+            return waitResult == ResponseWaitResult.TimedOut
+                ? FetchErrorKind.TimedOut
+                : FetchErrorKind.ExitedEarly;
         }
 
         private static UsageSnapshot FromRpcError(
@@ -912,6 +933,27 @@ namespace CodexUsageTray
             UsageSnapshot snapshot = UsageSnapshot.FromError(message);
             snapshot.LastAttempted = attemptedAt;
             return snapshot;
+        }
+
+        private static string GetRedemptionFailureMessage(FetchErrorKind kind)
+        {
+            switch (kind)
+            {
+                case FetchErrorKind.CommandNotFound:
+                    return "Codex CLI was not found. Install Codex or add it to PATH.";
+                case FetchErrorKind.StartFailed:
+                    return "Codex app-server could not be started.";
+                case FetchErrorKind.TimedOut:
+                    return "Codex app-server timed out while using the reset credit.";
+                case FetchErrorKind.AuthenticationRequired:
+                    return "Codex is not signed in. Run codex login.";
+                case FetchErrorKind.ExitedEarly:
+                    return "Codex app-server exited before returning the reset result.";
+                case FetchErrorKind.RequestRejected:
+                    return "Codex app-server rejected the reset request.";
+                default:
+                    return "Codex app-server returned invalid reset data.";
+            }
         }
 
         private static string CompactErrorDetail(string value, int maxLength)
@@ -1127,6 +1169,151 @@ namespace CodexUsageTray
             catch (Exception)
             {
                 // Cleanup is best-effort after killing only the process we started.
+            }
+        }
+
+        private static AppServerRequestResult ExecuteAppServerRequest(
+            AppServerRequestSender sendRequest)
+        {
+            string codexCommand = ResolveCodexCommand();
+            if (string.IsNullOrEmpty(codexCommand))
+            {
+                return AppServerRequestResult.FromError(FetchErrorKind.CommandNotFound);
+            }
+
+            Process process = null;
+            ProcessOutputBuffer output = null;
+            ProcessErrorHints errorHints = null;
+            bool processStarted = false;
+            bool requestSent = false;
+
+            try
+            {
+                JavaScriptSerializer serializer = CreateSerializer();
+                process = new Process();
+                process.StartInfo = CreateStartInfo(codexCommand);
+                output = new ProcessOutputBuffer();
+                errorHints = new ProcessErrorHints();
+                process.OutputDataReceived += output.HandleDataReceived;
+                process.ErrorDataReceived += errorHints.HandleDataReceived;
+
+                if (!process.Start())
+                {
+                    return AppServerRequestResult.FromError(FetchErrorKind.StartFailed);
+                }
+
+                processStarted = true;
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+
+                Stopwatch timer = Stopwatch.StartNew();
+                SendInitialize(process.StandardInput, serializer);
+
+                Dictionary<string, object> initializeResponse;
+                ResponseWaitResult initializeWait = WaitForResponse(
+                    process,
+                    output,
+                    serializer,
+                    timer,
+                    1,
+                    out initializeResponse);
+                if (initializeWait != ResponseWaitResult.Success)
+                {
+                    return AppServerRequestResult.FromError(
+                        GetWaitErrorKind(initializeWait, errorHints));
+                }
+
+                Dictionary<string, object> initializeError;
+                if (TryGetDictionary(initializeResponse, "error", out initializeError))
+                {
+                    return AppServerRequestResult.FromResponse(initializeResponse);
+                }
+
+                Dictionary<string, object> initializeResult;
+                if (!TryGetDictionary(initializeResponse, "result", out initializeResult))
+                {
+                    return AppServerRequestResult.FromError(FetchErrorKind.InvalidResponse);
+                }
+
+                SendInitialized(process.StandardInput, serializer);
+                sendRequest(process.StandardInput, serializer);
+                requestSent = true;
+
+                Dictionary<string, object> response;
+                ResponseWaitResult requestWait = WaitForResponse(
+                    process,
+                    output,
+                    serializer,
+                    timer,
+                    2,
+                    out response);
+                if (requestWait != ResponseWaitResult.Success)
+                {
+                    return AppServerRequestResult.FromError(
+                        GetWaitErrorKind(requestWait, errorHints));
+                }
+
+                CloseStandardInput(process);
+                return AppServerRequestResult.FromResponse(response);
+            }
+            catch (Exception)
+            {
+                if (errorHints != null && errorHints.AuthenticationRequired)
+                {
+                    return AppServerRequestResult.FromError(
+                        FetchErrorKind.AuthenticationRequired);
+                }
+
+                return AppServerRequestResult.FromError(
+                    requestSent ? FetchErrorKind.ExitedEarly : FetchErrorKind.StartFailed);
+            }
+            finally
+            {
+                CloseStandardInput(process);
+                StopProcess(process, processStarted);
+
+                if (process != null && output != null)
+                {
+                    process.OutputDataReceived -= output.HandleDataReceived;
+                }
+                if (process != null && errorHints != null)
+                {
+                    process.ErrorDataReceived -= errorHints.HandleDataReceived;
+                }
+                if (output != null)
+                {
+                    output.Dispose();
+                }
+                if (process != null)
+                {
+                    process.Dispose();
+                }
+            }
+        }
+
+        private sealed class AppServerRequestResult
+        {
+            public Dictionary<string, object> Response;
+            public FetchErrorKind ErrorKind;
+
+            public bool IsSuccess
+            {
+                get { return Response != null; }
+            }
+
+            public static AppServerRequestResult FromResponse(
+                Dictionary<string, object> response)
+            {
+                AppServerRequestResult result = new AppServerRequestResult();
+                result.Response = response;
+                return result;
+            }
+
+            public static AppServerRequestResult FromError(FetchErrorKind kind)
+            {
+                AppServerRequestResult result = new AppServerRequestResult();
+                result.ErrorKind = kind;
+                return result;
             }
         }
 

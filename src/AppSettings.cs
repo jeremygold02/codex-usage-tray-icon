@@ -9,7 +9,7 @@ namespace CodexUsageTray
 {
     internal sealed class AppSettings
     {
-        public const int CurrentSettingsVersion = 6;
+        public const int CurrentSettingsVersion = 7;
         public const string DefaultTrayBoxColor = "#0078D7";
         public const string DefaultTrayTextColor = "#FFFFFF";
         public const string IconMetricWeekly = "Weekly";
@@ -42,6 +42,8 @@ namespace CodexUsageTray
         public bool ShowResetAvailability { get; set; }
         public bool StartWithWindows { get; set; }
         public bool ThresholdNotifications { get; set; }
+        public bool AutoRedeemResetCredits { get; set; }
+        public int AutoRedeemLeadMinutes { get; set; }
         public int RefreshSeconds { get; set; }
         public int IdleRefreshSeconds { get; set; }
         public bool ShowTrayBox { get; set; }
@@ -49,6 +51,10 @@ namespace CodexUsageTray
         public string TrayBoxColor { get; set; }
         public string TrayTextColor { get; set; }
         public string Theme { get; set; }
+        public string AutoRedeemCreditId { get; set; }
+        public string AutoRedeemIdempotencyKey { get; set; }
+        public string AutoRedeemAttemptStatus { get; set; }
+        public DateTime? AutoRedeemLastAttemptUtc { get; set; }
 
         internal bool IsSaveBlockedByNewerVersion
         {
@@ -77,6 +83,8 @@ namespace CodexUsageTray
             ShowResetAvailability = true;
             StartWithWindows = false;
             ThresholdNotifications = false;
+            AutoRedeemResetCredits = false;
+            AutoRedeemLeadMinutes = 5;
             RefreshSeconds = 300;
             IdleRefreshSeconds = 0;
             ShowTrayBox = true;
@@ -110,6 +118,8 @@ namespace CodexUsageTray
             ShowResetAvailability = source.ShowResetAvailability;
             StartWithWindows = source.StartWithWindows;
             ThresholdNotifications = source.ThresholdNotifications;
+            AutoRedeemResetCredits = source.AutoRedeemResetCredits;
+            AutoRedeemLeadMinutes = source.AutoRedeemLeadMinutes;
             RefreshSeconds = source.RefreshSeconds;
             IdleRefreshSeconds = source.IdleRefreshSeconds;
             ShowTrayBox = source.ShowTrayBox;
@@ -117,6 +127,10 @@ namespace CodexUsageTray
             TrayBoxColor = source.TrayBoxColor;
             TrayTextColor = source.TrayTextColor;
             Theme = source.Theme;
+            AutoRedeemCreditId = source.AutoRedeemCreditId;
+            AutoRedeemIdempotencyKey = source.AutoRedeemIdempotencyKey;
+            AutoRedeemAttemptStatus = source.AutoRedeemAttemptStatus;
+            AutoRedeemLastAttemptUtc = source.AutoRedeemLastAttemptUtc;
         }
 
         public static AppSettings Load()
@@ -368,6 +382,15 @@ namespace CodexUsageTray
                 ShowAdditionalLimits = true;
                 ShowResetAvailability = true;
             }
+            if (sourceVersion < 7)
+            {
+                AutoRedeemResetCredits = false;
+                AutoRedeemLeadMinutes = 5;
+                AutoRedeemCreditId = null;
+                AutoRedeemIdempotencyKey = null;
+                AutoRedeemAttemptStatus = null;
+                AutoRedeemLastAttemptUtc = null;
+            }
             if (CriticalThreshold < 1 || CriticalThreshold > 99)
             {
                 CriticalThreshold = 15;
@@ -403,6 +426,27 @@ namespace CodexUsageTray
             else if (IdleRefreshSeconds > 0 && IdleRefreshSeconds < RefreshSeconds)
             {
                 IdleRefreshSeconds = RefreshSeconds;
+            }
+            if (AutoRedeemLeadMinutes < 1 || AutoRedeemLeadMinutes > 120)
+            {
+                AutoRedeemLeadMinutes = 5;
+            }
+            if (string.IsNullOrWhiteSpace(AutoRedeemCreditId) ||
+                string.IsNullOrWhiteSpace(AutoRedeemIdempotencyKey))
+            {
+                AutoRedeemCreditId = null;
+                AutoRedeemIdempotencyKey = null;
+                AutoRedeemAttemptStatus = null;
+                AutoRedeemLastAttemptUtc = null;
+            }
+            else if (AutoRedeemLastAttemptUtc.HasValue)
+            {
+                DateTime attemptedAt = AutoRedeemLastAttemptUtc.Value;
+                AutoRedeemLastAttemptUtc = attemptedAt.Kind == DateTimeKind.Utc
+                    ? attemptedAt
+                    : attemptedAt.Kind == DateTimeKind.Local
+                        ? attemptedAt.ToUniversalTime()
+                        : DateTime.SpecifyKind(attemptedAt, DateTimeKind.Utc);
             }
             if (string.IsNullOrWhiteSpace(TrayBoxColor) || !IsColorValue(TrayBoxColor))
             {

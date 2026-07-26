@@ -139,7 +139,9 @@ jobs:
             /reference:System.Web.Extensions.dll `
             tests\CodexUsageTray.Tests.cs `
             src\CodexRateLimitClient.cs `
+            src\AutomaticResetRedemptionPolicy.cs `
             src\RateLimitResetCredit.cs `
+            src\ResetCreditRedemptionResult.cs `
             src\UsageSnapshot.cs `
             src\UsageLimitSet.cs `
             src\LimitWindow.cs `

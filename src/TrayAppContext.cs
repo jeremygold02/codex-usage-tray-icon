@@ -18,7 +18,12 @@ namespace CodexUsageTray
     internal sealed class TrayAppContext : ApplicationContext
     {
         private const int ActivityPollSeconds = 30;
+        private const int AutoRedemptionRetrySeconds = 60;
+        private const int AutoRedemptionBusyRetrySeconds = 5;
         private const int ShowWindowRestore = 9;
+        private const string AutoRedemptionPendingStatus = "pending";
+        private const string AutoRedemptionNothingToResetStatus = "nothingToReset";
+        private const string AutoRedemptionCompletedStatus = "completed";
         private const string RefreshingStatus = "Refreshing usage...";
         private const string RefreshFailedStatus = "Refresh failed; showing last known usage.";
         private const string RefreshFailedWithoutDataStatus = "Unable to refresh usage. Try again.";
@@ -31,6 +36,7 @@ namespace CodexUsageTray
 
         private readonly NotifyIcon notifyIcon;
         private readonly System.Windows.Forms.Timer refreshTimer;
+        private readonly System.Windows.Forms.Timer autoRedemptionTimer;
         private readonly System.Windows.Forms.Timer activityTimer;
         private readonly Control dispatcher;
         private readonly AppSettings settings;
@@ -51,10 +57,14 @@ namespace CodexUsageTray
         private bool codexRunning;
         private bool refreshInProgress;
         private bool refreshFeedbackRequested;
+        private bool autoRedemptionInProgress;
+        private bool refreshAfterAutoRedemption;
+        private bool suppressNextUsageResetNotification;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
         private volatile bool shuttingDown;
         private string updateStatusText = "";
+        private string lastAutoRedemptionError;
         private SettingsForm settingsForm;
         private System.Windows.Forms.Timer startupUiTimer;
 
@@ -92,6 +102,24 @@ namespace CodexUsageTray
                 RefreshUsageIfDue(false);
             };
 
+            autoRedemptionTimer = new System.Windows.Forms.Timer();
+            autoRedemptionTimer.Tick += delegate
+            {
+                autoRedemptionTimer.Stop();
+                if (shuttingDown || !settings.AutoRedeemResetCredits)
+                {
+                    return;
+                }
+                if (refreshInProgress || autoRedemptionInProgress)
+                {
+                    ArmAutomaticRedemptionTimer(
+                        (long)AutoRedemptionBusyRetrySeconds * 1000L);
+                    return;
+                }
+
+                RefreshUsage(false);
+            };
+
             codexRunning = CodexActivityMonitor.IsCodexRunning();
             activityTimer = new System.Windows.Forms.Timer();
             activityTimer.Interval = ActivityPollSeconds * 1000;
@@ -99,6 +127,12 @@ namespace CodexUsageTray
             activityTimer.Start();
 
             RefreshUsageIfDue(false);
+            if (settings.AutoRedeemResetCredits &&
+                !refreshInProgress &&
+                lastSuccessfulSnapshot == null)
+            {
+                RefreshUsage(false);
+            }
             CheckForUpdates(false);
             if (showUsageOnStart || showSettingsOnStart)
             {
@@ -197,6 +231,12 @@ namespace CodexUsageTray
             }
 
             refreshFeedbackRequested = refreshFeedbackRequested || showBalloon;
+            if (autoRedemptionInProgress)
+            {
+                refreshAfterAutoRedemption = true;
+                SetUsagePopupRefreshing(true);
+                return;
+            }
             if (refreshInProgress)
             {
                 SetUsagePopupRefreshing(true);
@@ -437,6 +477,11 @@ namespace CodexUsageTray
             snapshot.IsPaused = false;
 
             UsageResetKind resets = usageResetDetector.Observe(snapshot);
+            if (suppressNextUsageResetNotification)
+            {
+                resets = UsageResetKind.None;
+                suppressNextUsageResetNotification = false;
+            }
             lastSuccessfulSnapshot = snapshot.Clone();
             currentSnapshot = snapshot.Clone();
             RenderDataSnapshot(
@@ -445,6 +490,7 @@ namespace CodexUsageTray
                 true,
                 showBalloon && resets == UsageResetKind.None);
             ShowUsageResetNotification(resets);
+            EvaluateAutomaticResetRedemption(snapshot);
         }
 
         private void ApplyRefreshFailure(UsageSnapshot failure, bool showBalloon)
@@ -489,6 +535,7 @@ namespace CodexUsageTray
             {
                 notifyIcon.ShowBalloonTip(3000, "Codex Usage", failureMessage, ToolTipIcon.Warning);
             }
+            ScheduleAutomaticRedemptionCheck(lastSuccessfulSnapshot);
         }
 
         private static string BuildPausedFailureStatus(string failureMessage)
@@ -886,6 +933,388 @@ namespace CodexUsageTray
                 ToolTipIcon.Info);
         }
 
+        private void EvaluateAutomaticResetRedemption(UsageSnapshot snapshot)
+        {
+            autoRedemptionTimer.Stop();
+            if (shuttingDown ||
+                !settings.AutoRedeemResetCredits ||
+                snapshot == null)
+            {
+                return;
+            }
+            if (refreshInProgress || autoRedemptionInProgress)
+            {
+                ArmAutomaticRedemptionTimer(
+                    (long)AutoRedemptionBusyRetrySeconds * 1000L);
+                return;
+            }
+
+            DateTime nowUtc = DateTime.UtcNow;
+            string excludedCreditId = string.Equals(
+                settings.AutoRedeemAttemptStatus,
+                AutoRedemptionCompletedStatus,
+                StringComparison.Ordinal)
+                    ? settings.AutoRedeemCreditId
+                    : null;
+            RateLimitResetCredit credit =
+                AutomaticResetRedemptionPolicy.FindEligibleCredit(
+                    snapshot,
+                    nowUtc,
+                    settings.AutoRedeemLeadMinutes,
+                    excludedCreditId);
+            if (credit == null)
+            {
+                ScheduleAutomaticRedemptionCheck(snapshot);
+                return;
+            }
+
+            string idempotencyKey;
+            DateTime? retryAtUtc;
+            if (!TryPrepareAutomaticRedemption(
+                credit,
+                nowUtc,
+                out idempotencyKey,
+                out retryAtUtc))
+            {
+                if (retryAtUtc.HasValue)
+                {
+                    ArmAutomaticRedemptionTimerAt(retryAtUtc.Value);
+                }
+                return;
+            }
+
+            StartAutomaticRedemption(credit.Id, idempotencyKey);
+        }
+
+        private bool TryPrepareAutomaticRedemption(
+            RateLimitResetCredit credit,
+            DateTime nowUtc,
+            out string idempotencyKey,
+            out DateTime? retryAtUtc)
+        {
+            idempotencyKey = null;
+            retryAtUtc = null;
+            if (credit == null || string.IsNullOrWhiteSpace(credit.Id))
+            {
+                return false;
+            }
+
+            bool sameCredit = string.Equals(
+                settings.AutoRedeemCreditId,
+                credit.Id,
+                StringComparison.Ordinal);
+            if (sameCredit &&
+                string.Equals(
+                    settings.AutoRedeemAttemptStatus,
+                    AutoRedemptionCompletedStatus,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (sameCredit && settings.AutoRedeemLastAttemptUtc.HasValue)
+            {
+                DateTime nextAttemptUtc = NormalizeUtc(
+                    settings.AutoRedeemLastAttemptUtc.Value)
+                    .AddSeconds(AutoRedemptionRetrySeconds);
+                if (nowUtc < nextAttemptUtc)
+                {
+                    retryAtUtc = nextAttemptUtc;
+                    return false;
+                }
+            }
+
+            bool reusePendingKey = sameCredit &&
+                string.Equals(
+                    settings.AutoRedeemAttemptStatus,
+                    AutoRedemptionPendingStatus,
+                    StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(settings.AutoRedeemIdempotencyKey);
+            idempotencyKey = reusePendingKey
+                ? settings.AutoRedeemIdempotencyKey
+                : Guid.NewGuid().ToString("D");
+
+            AppSettings candidate = settings.Clone();
+            candidate.AutoRedeemCreditId = credit.Id;
+            candidate.AutoRedeemIdempotencyKey = idempotencyKey;
+            candidate.AutoRedeemAttemptStatus = AutoRedemptionPendingStatus;
+            candidate.AutoRedeemLastAttemptUtc = nowUtc;
+
+            try
+            {
+                candidate.Save();
+            }
+            catch (Exception ex)
+            {
+                ShowAutomaticRedemptionError(
+                    credit.Id,
+                    "Could not save redemption state: " + ex.Message);
+                retryAtUtc = nowUtc.AddSeconds(AutoRedemptionRetrySeconds);
+                idempotencyKey = null;
+                return false;
+            }
+
+            settings.CopyValuesFrom(candidate);
+            return true;
+        }
+
+        private void StartAutomaticRedemption(string creditId, string idempotencyKey)
+        {
+            autoRedemptionTimer.Stop();
+            autoRedemptionInProgress = true;
+
+            CancellationToken cancellationToken = shutdownCancellation.Token;
+            Task.Factory.StartNew(
+                delegate
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return CodexRateLimitClient.ConsumeResetCredit(
+                        creditId,
+                        idempotencyKey);
+                },
+                cancellationToken,
+                TaskCreationOptions.None,
+                TaskScheduler.Default).ContinueWith(
+                    delegate(Task<ResetCreditRedemptionResult> task)
+                    {
+                        if (task.IsFaulted)
+                        {
+                            AggregateException ignored = task.Exception;
+                        }
+
+                        TryPostToUi(delegate
+                        {
+                            if (shuttingDown)
+                            {
+                                return;
+                            }
+
+                            CompleteAutomaticRedemption(
+                                creditId,
+                                GetCompletedRedemptionResult(task));
+                        });
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+        }
+
+        private static ResetCreditRedemptionResult GetCompletedRedemptionResult(
+            Task<ResetCreditRedemptionResult> task)
+        {
+            if (task == null)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "The reset request returned no result.");
+            }
+            if (task.IsCanceled)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "The reset request was canceled.");
+            }
+            if (task.IsFaulted)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "An unexpected error occurred while using the reset credit.");
+            }
+            if (task.Result == null)
+            {
+                return ResetCreditRedemptionResult.FromError(
+                    "The reset request returned no result.");
+            }
+
+            return task.Result;
+        }
+
+        private void CompleteAutomaticRedemption(
+            string creditId,
+            ResetCreditRedemptionResult result)
+        {
+            autoRedemptionInProgress = false;
+            if (result == null)
+            {
+                result = ResetCreditRedemptionResult.FromError(
+                    "The reset request returned no result.");
+            }
+
+            RecordAutomaticRedemptionResult(creditId, result);
+
+            bool refreshUsage = refreshAfterAutoRedemption;
+            refreshAfterAutoRedemption = false;
+            switch (result.Outcome)
+            {
+                case ResetCreditRedemptionOutcome.Reset:
+                    lastAutoRedemptionError = null;
+                    suppressNextUsageResetNotification = true;
+                    notifyIcon.ShowBalloonTip(
+                        5000,
+                        "Codex Limit Reset Used",
+                        "An expiring limit reset was used automatically.",
+                        ToolTipIcon.Info);
+                    refreshUsage = true;
+                    break;
+                case ResetCreditRedemptionOutcome.AlreadyRedeemed:
+                    lastAutoRedemptionError = null;
+                    suppressNextUsageResetNotification = true;
+                    notifyIcon.ShowBalloonTip(
+                        4000,
+                        "Codex Limit Reset",
+                        "The expiring reset had already been redeemed.",
+                        ToolTipIcon.Info);
+                    refreshUsage = true;
+                    break;
+                case ResetCreditRedemptionOutcome.NoCredit:
+                    lastAutoRedemptionError = null;
+                    refreshUsage = true;
+                    break;
+                case ResetCreditRedemptionOutcome.Failed:
+                    ShowAutomaticRedemptionError(creditId, result.ErrorMessage);
+                    break;
+            }
+
+            if (refreshUsage)
+            {
+                RefreshUsage(false);
+                return;
+            }
+
+            EvaluateAutomaticResetRedemption(lastSuccessfulSnapshot);
+        }
+
+        private void RecordAutomaticRedemptionResult(
+            string creditId,
+            ResetCreditRedemptionResult result)
+        {
+            AppSettings candidate = settings.Clone();
+            candidate.AutoRedeemCreditId = creditId;
+            candidate.AutoRedeemLastAttemptUtc = DateTime.UtcNow;
+            switch (result.Outcome)
+            {
+                case ResetCreditRedemptionOutcome.Reset:
+                case ResetCreditRedemptionOutcome.AlreadyRedeemed:
+                case ResetCreditRedemptionOutcome.NoCredit:
+                    candidate.AutoRedeemAttemptStatus = AutoRedemptionCompletedStatus;
+                    break;
+                case ResetCreditRedemptionOutcome.NothingToReset:
+                    candidate.AutoRedeemAttemptStatus =
+                        AutoRedemptionNothingToResetStatus;
+                    break;
+                default:
+                    candidate.AutoRedeemAttemptStatus = AutoRedemptionPendingStatus;
+                    break;
+            }
+
+            try
+            {
+                candidate.Save();
+            }
+            catch (Exception ex)
+            {
+                ShowAutomaticRedemptionError(
+                    creditId,
+                    "Could not update redemption state: " + ex.Message);
+            }
+
+            settings.CopyValuesFrom(candidate);
+        }
+
+        private void ShowAutomaticRedemptionError(string creditId, string message)
+        {
+            string safeMessage = string.IsNullOrWhiteSpace(message)
+                ? "The automatic reset request failed."
+                : message.Trim();
+            string errorKey = (creditId ?? "") + "|" + safeMessage;
+            if (string.Equals(lastAutoRedemptionError, errorKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            lastAutoRedemptionError = errorKey;
+            notifyIcon.ShowBalloonTip(
+                5000,
+                "Codex Automatic Reset",
+                safeMessage,
+                ToolTipIcon.Warning);
+        }
+
+        private void ScheduleAutomaticRedemptionCheck(UsageSnapshot snapshot)
+        {
+            autoRedemptionTimer.Stop();
+            if (shuttingDown ||
+                !settings.AutoRedeemResetCredits ||
+                autoRedemptionInProgress)
+            {
+                return;
+            }
+            if (snapshot == null)
+            {
+                ArmAutomaticRedemptionTimer(
+                    (long)AutoRedemptionRetrySeconds * 1000L);
+                return;
+            }
+
+            string excludedCreditId = string.Equals(
+                settings.AutoRedeemAttemptStatus,
+                AutoRedemptionCompletedStatus,
+                StringComparison.Ordinal)
+                    ? settings.AutoRedeemCreditId
+                    : null;
+            DateTime? nextCheckUtc =
+                AutomaticResetRedemptionPolicy.GetNextCheckUtc(
+                    snapshot,
+                    DateTime.UtcNow,
+                    settings.AutoRedeemLeadMinutes,
+                    excludedCreditId);
+            if (nextCheckUtc.HasValue)
+            {
+                ArmAutomaticRedemptionTimerAt(nextCheckUtc.Value);
+            }
+        }
+
+        private void ArmAutomaticRedemptionTimerAt(DateTime checkAtUtc)
+        {
+            DateTime normalizedCheckAt = NormalizeUtc(checkAtUtc);
+            double delay = (normalizedCheckAt - DateTime.UtcNow).TotalMilliseconds;
+            if (delay <= 0.0)
+            {
+                delay = (double)AutoRedemptionRetrySeconds * 1000.0;
+            }
+
+            ArmAutomaticRedemptionTimer(
+                delay >= long.MaxValue ? long.MaxValue : (long)Math.Ceiling(delay));
+        }
+
+        private void ArmAutomaticRedemptionTimer(long delayMilliseconds)
+        {
+            if (shuttingDown ||
+                !settings.AutoRedeemResetCredits ||
+                autoRedemptionInProgress)
+            {
+                return;
+            }
+
+            long boundedDelay = Math.Max(
+                1000L,
+                Math.Min((long)int.MaxValue, delayMilliseconds));
+            autoRedemptionTimer.Stop();
+            autoRedemptionTimer.Interval = (int)boundedDelay;
+            autoRedemptionTimer.Start();
+        }
+
+        private static DateTime NormalizeUtc(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Utc)
+            {
+                return value;
+            }
+            if (value.Kind == DateTimeKind.Local)
+            {
+                return value.ToUniversalTime();
+            }
+
+            return DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        }
+
         private int GetThresholdLevel(LimitWindow window)
         {
             if (window == null)
@@ -994,6 +1423,22 @@ namespace CodexUsageTray
                     RenderDataSnapshot(currentSnapshot, true, true, false);
                 }
                 RefreshScheduleChanged();
+                if (settings.AutoRedeemResetCredits)
+                {
+                    if (!refreshInProgress && !autoRedemptionInProgress)
+                    {
+                        RefreshUsage(false);
+                    }
+                    else
+                    {
+                        ArmAutomaticRedemptionTimer(
+                            (long)AutoRedemptionBusyRetrySeconds * 1000L);
+                    }
+                }
+                else
+                {
+                    autoRedemptionTimer.Stop();
+                }
             };
             settingsForm.CheckUpdatesRequested += delegate { CheckForUpdates(true); };
             settingsForm.Show();
@@ -1322,6 +1767,8 @@ namespace CodexUsageTray
 
             refreshTimer.Stop();
             refreshTimer.Dispose();
+            autoRedemptionTimer.Stop();
+            autoRedemptionTimer.Dispose();
             activityTimer.Stop();
             activityTimer.Dispose();
             if (startupUiTimer != null)

@@ -39,6 +39,7 @@ The related Settings options can hide reset availability, reset times, or last-u
 - Idle refresh defaults to off. When no Codex process is running, automatic checks pause unless an idle interval is configured; manual refresh remains available.
 - A failed refresh keeps the last successful values visible and marks them as stale instead of replacing them with empty data.
 - The first successful refresh that observes a weekly or 5-hour limit return to 100% shows one reset notification. Startup-at-100, stale refreshes, and brief 99%-to-100% jitter do not produce duplicate alerts.
+- **Auto-use resets** is opt-in and disabled by default. When enabled, the app can redeem an itemized Codex reset credit shortly before expiration, defaulting to five minutes, only when there is usage to reset. Redemption attempts use persisted idempotency state to prevent duplicates.
 - Open Settings from the popup gear or tray menu. Changes are saved only when **OK** is selected and immediately update the icon, popup, notifications, startup behavior, and refresh schedule as applicable.
 - Settings also provides theme and tray appearance controls, threshold notifications, popup visibility options, Windows startup, and update checks.
 
@@ -57,7 +58,7 @@ The related Settings options can hide reset availability, reset times, or last-u
 
 Codex credentials remain managed by the Codex CLI; the tray app does not copy or store them. Usage snapshots are kept in memory, while app preferences are stored locally in `%APPDATA%\CodexUsageTray\settings.json`.
 
-The Codex CLI contacts OpenAI for the authenticated rate-limit read. The tray app also contacts GitHub to check for releases and, when requested, download an update. It has no separate telemetry or analytics path and does not send prompts or synthetic model requests.
+The Codex CLI contacts OpenAI for authenticated rate-limit reads and, when **Auto-use resets** is enabled, supported reset-credit redemption requests. The tray app also contacts GitHub to check for releases and, when requested, download an update. It has no separate telemetry or analytics path and does not send prompts or synthetic model requests.
 
 ## Attribution
 
