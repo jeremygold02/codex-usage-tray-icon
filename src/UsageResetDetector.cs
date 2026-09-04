@@ -78,4 +78,54 @@ namespace CodexUsageTray
             public int BelowFullObservations;
         }
     }
+
+    internal sealed class UsageResetNotificationSuppression
+    {
+        private DateTime suppressThroughUtc = DateTime.MinValue;
+
+        public void SuppressFor(DateTime nowUtc, TimeSpan duration)
+        {
+            if (duration <= TimeSpan.Zero)
+            {
+                suppressThroughUtc = DateTime.MinValue;
+                return;
+            }
+
+            DateTime candidate = NormalizeUtc(nowUtc).Add(duration);
+            if (candidate > suppressThroughUtc)
+            {
+                suppressThroughUtc = candidate;
+            }
+        }
+
+        public UsageResetKind Filter(UsageResetKind detectedResets, DateTime nowUtc)
+        {
+            if (suppressThroughUtc == DateTime.MinValue)
+            {
+                return detectedResets;
+            }
+
+            if (NormalizeUtc(nowUtc) > suppressThroughUtc)
+            {
+                suppressThroughUtc = DateTime.MinValue;
+                return detectedResets;
+            }
+
+            return UsageResetKind.None;
+        }
+
+        private static DateTime NormalizeUtc(DateTime value)
+        {
+            if (value.Kind == DateTimeKind.Utc)
+            {
+                return value;
+            }
+            if (value.Kind == DateTimeKind.Local)
+            {
+                return value.ToUniversalTime();
+            }
+
+            return DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        }
+    }
 }

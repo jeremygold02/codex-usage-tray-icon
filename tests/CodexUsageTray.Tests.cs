@@ -23,6 +23,7 @@ namespace CodexUsageTray.Tests
             TestResetCreditRedemptionResponses();
             TestDeepClone();
             TestUsageResetDetection();
+            TestUsageResetNotificationSuppression();
             TestAutomaticResetRedemptionPolicy();
 
             if (failures != 0)
@@ -294,6 +295,40 @@ namespace CodexUsageTray.Tests
                 UsageResetKind.Weekly,
                 immediateRearm.Observe(CreateSnapshot(100, null)),
                 "98 percent usage rearms detection immediately");
+        }
+
+        private static void TestUsageResetNotificationSuppression()
+        {
+            DateTime startedAtUtc =
+                new DateTime(2026, 7, 26, 23, 42, 17, DateTimeKind.Utc);
+            UsageResetNotificationSuppression suppression =
+                new UsageResetNotificationSuppression();
+
+            suppression.SuppressFor(startedAtUtc, TimeSpan.FromMinutes(30));
+            AssertReset(
+                UsageResetKind.None,
+                suppression.Filter(
+                    UsageResetKind.None,
+                    startedAtUtc.AddMinutes(1)),
+                "post-redemption refresh keeps reset notifications suppressed");
+            AssertReset(
+                UsageResetKind.None,
+                suppression.Filter(
+                    UsageResetKind.Weekly,
+                    startedAtUtc.AddMinutes(2)),
+                "delayed weekly reset notification is suppressed");
+            AssertReset(
+                UsageResetKind.None,
+                suppression.Filter(
+                    UsageResetKind.FiveHour,
+                    startedAtUtc.AddMinutes(3)),
+                "delayed 5-hour reset notification is suppressed");
+            AssertReset(
+                UsageResetKind.Weekly,
+                suppression.Filter(
+                    UsageResetKind.Weekly,
+                    startedAtUtc.AddMinutes(31)),
+                "reset notifications resume after suppression expires");
         }
 
         private static void TestAutomaticResetRedemptionPolicy()

@@ -20,6 +20,7 @@ namespace CodexUsageTray
         private const int ActivityPollSeconds = 30;
         private const int AutoRedemptionRetrySeconds = 60;
         private const int AutoRedemptionBusyRetrySeconds = 5;
+        private const int AutoRedemptionResetNotificationSuppressionMinutes = 30;
         private const int ShowWindowRestore = 9;
         private const string AutoRedemptionPendingStatus = "pending";
         private const string AutoRedemptionNothingToResetStatus = "nothingToReset";
@@ -43,6 +44,7 @@ namespace CodexUsageTray
         private readonly Stopwatch refreshClock;
         private readonly CancellationTokenSource shutdownCancellation;
         private readonly UsageResetDetector usageResetDetector;
+        private readonly UsageResetNotificationSuppression usageResetNotificationSuppression;
         private readonly bool showUsageOnStart;
         private readonly bool showSettingsOnStart;
 
@@ -59,7 +61,6 @@ namespace CodexUsageTray
         private bool refreshFeedbackRequested;
         private bool autoRedemptionInProgress;
         private bool refreshAfterAutoRedemption;
-        private bool suppressNextUsageResetNotification;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
         private volatile bool shuttingDown;
@@ -83,6 +84,7 @@ namespace CodexUsageTray
             refreshClock = Stopwatch.StartNew();
             shutdownCancellation = new CancellationTokenSource();
             usageResetDetector = new UsageResetDetector();
+            usageResetNotificationSuppression = new UsageResetNotificationSuppression();
             dispatcher = new Control();
             dispatcher.CreateControl();
             settings = AppSettings.Load();
@@ -476,12 +478,9 @@ namespace CodexUsageTray
             snapshot.IsRefreshing = false;
             snapshot.IsPaused = false;
 
-            UsageResetKind resets = usageResetDetector.Observe(snapshot);
-            if (suppressNextUsageResetNotification)
-            {
-                resets = UsageResetKind.None;
-                suppressNextUsageResetNotification = false;
-            }
+            UsageResetKind resets = usageResetNotificationSuppression.Filter(
+                usageResetDetector.Observe(snapshot),
+                DateTime.UtcNow);
             lastSuccessfulSnapshot = snapshot.Clone();
             currentSnapshot = snapshot.Clone();
             RenderDataSnapshot(
@@ -1145,7 +1144,7 @@ namespace CodexUsageTray
             {
                 case ResetCreditRedemptionOutcome.Reset:
                     lastAutoRedemptionError = null;
-                    suppressNextUsageResetNotification = true;
+                    SuppressAutomaticRedemptionUsageResetNotifications();
                     notifyIcon.ShowBalloonTip(
                         5000,
                         "Codex Limit Reset Used",
@@ -1155,7 +1154,7 @@ namespace CodexUsageTray
                     break;
                 case ResetCreditRedemptionOutcome.AlreadyRedeemed:
                     lastAutoRedemptionError = null;
-                    suppressNextUsageResetNotification = true;
+                    SuppressAutomaticRedemptionUsageResetNotifications();
                     notifyIcon.ShowBalloonTip(
                         4000,
                         "Codex Limit Reset",
@@ -1179,6 +1178,14 @@ namespace CodexUsageTray
             }
 
             EvaluateAutomaticResetRedemption(lastSuccessfulSnapshot);
+        }
+
+        private void SuppressAutomaticRedemptionUsageResetNotifications()
+        {
+            usageResetNotificationSuppression.SuppressFor(
+                DateTime.UtcNow,
+                TimeSpan.FromMinutes(
+                    AutoRedemptionResetNotificationSuppressionMinutes));
         }
 
         private void RecordAutomaticRedemptionResult(
