@@ -26,7 +26,7 @@ Each refresh starts a short-lived local `codex app-server --stdio` process and r
 
 The popup opens in its compact state and shows each primary weekly or 5-hour limit returned by Codex. Temporarily unavailable windows are hidden; if neither window is returned, the refresh fails with a clear status instead of displaying unknown values. A status line also appears while refreshing or when automatic checks are paused.
 
-When the account response includes reset credits, a `Limit resets` control appears. Expand it to see:
+When reset credits are available, the popup shows their count and the next known expiration in local time, such as `3 limit resets (next expires Sep 8, 2:30 PM)`. The control is hidden when no resets are available. Expand it to see:
 
 - Available reset credits, including their titles and local expiration date/time when supplied by Codex.
 

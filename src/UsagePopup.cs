@@ -342,7 +342,7 @@ namespace CodexUsageTray
         {
             Button button = new Button();
             button.Name = "detailsButton";
-            button.Text = "Limit resets";
+            button.AutoEllipsis = true;
             button.Font = detailFont;
             button.AccessibleName = "Show limit resets";
             button.AccessibleDescription = "Show available limit reset expirations";
@@ -873,7 +873,7 @@ namespace CodexUsageTray
 
         private bool HasExpandableDetails()
         {
-            return ShouldShowResetAvailability() && HasResetInformation();
+            return ShouldShowResetAvailability() && GetResetDisplayCount() > 0;
         }
 
         private bool ShouldShowResetAvailability()
@@ -902,6 +902,34 @@ namespace CodexUsageTray
                 ? snapshot.AvailableResetCount.Value
                 : 0;
             return Math.Max(knownCount, Math.Max(0, reportedCount));
+        }
+
+        private string BuildResetSummary()
+        {
+            int count = GetResetDisplayCount();
+            string summary = count.ToString(CultureInfo.CurrentCulture) +
+                (count == 1 ? " limit reset" : " limit resets");
+            DateTime? nextExpiration = null;
+            if (snapshot != null && snapshot.AvailableResets != null)
+            {
+                foreach (RateLimitResetCredit credit in snapshot.AvailableResets)
+                {
+                    if (credit != null && credit.ExpiresAtUtc.HasValue &&
+                        (!nextExpiration.HasValue ||
+                            credit.ExpiresAtUtc.Value < nextExpiration.Value))
+                    {
+                        nextExpiration = credit.ExpiresAtUtc.Value;
+                    }
+                }
+            }
+
+            if (nextExpiration.HasValue)
+            {
+                summary += " (next expires " + TimeFormatter.FormatDateTime(
+                    nextExpiration.Value.ToLocalTime()) + ")";
+            }
+
+            return summary;
         }
 
         private int GetExpandedDetailLineCount()
@@ -1060,9 +1088,9 @@ namespace CodexUsageTray
                 ScaleMetric(y),
                 ClientSize.Width - ScaleMetric(20),
                 ScaleMetric(LogicalDetailsButtonHeight));
-            detailsButton.AccessibleName = detailsExpanded
-                ? "Hide limit resets"
-                : "Show limit resets";
+            detailsButton.Text = BuildResetSummary();
+            detailsButton.AccessibleName = (detailsExpanded ? "Hide " : "Show ") +
+                detailsButton.Text;
             detailsButton.AccessibleDescription = detailsButton.AccessibleName;
             actionToolTip.SetToolTip(detailsButton, detailsButton.AccessibleName);
             detailsButton.Invalidate();
