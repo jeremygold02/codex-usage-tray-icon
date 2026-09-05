@@ -23,6 +23,7 @@ namespace CodexUsageTray.Tests
             TestResetCreditRedemptionResponses();
             TestDeepClone();
             TestUsageResetDetection();
+            TestBankedResetDetection();
             TestUsageResetNotificationSuppression();
             TestAutomaticResetRedemptionPolicy();
 
@@ -329,6 +330,74 @@ namespace CodexUsageTray.Tests
                     UsageResetKind.Weekly,
                     startedAtUtc.AddMinutes(31)),
                 "reset notifications resume after suppression expires");
+        }
+
+        private static void TestBankedResetDetection()
+        {
+            BankedResetDetector detector = new BankedResetDetector();
+            UsageSnapshot initial = CreateSnapshot(80, 70);
+            initial.AvailableResetCount = 2;
+            initial.AvailableResets.Add(CreateCredit("credit-1", "codexRateLimits", DateTime.UtcNow));
+            initial.AvailableResets.Add(CreateCredit("credit-2", "codexRateLimits", DateTime.UtcNow));
+            AssertEqual(0, detector.Observe(initial), "initial banked resets establish a baseline");
+
+            UsageSnapshot added = initial.Clone();
+            added.AvailableResetCount = 3;
+            added.AvailableResets.Add(CreateCredit("credit-3", "codexRateLimits", DateTime.UtcNow));
+            AssertEqual(1, detector.Observe(added), "a higher banked reset count is detected");
+            AssertEqual(3, detector.CurrentAvailableCount, "current banked reset count is retained");
+            AssertEqual(0, detector.Observe(added), "unchanged banked resets are not duplicated");
+
+            UsageSnapshot replacement = added.Clone();
+            replacement.AvailableResets.RemoveAt(0);
+            replacement.AvailableResets.Add(
+                CreateCredit("credit-4", "codexRateLimits", DateTime.UtcNow));
+            AssertEqual(
+                1,
+                detector.Observe(replacement),
+                "a new itemized reset is detected when the total is unchanged");
+
+            UsageSnapshot missing = CreateSnapshot(80, 70);
+            AssertEqual(0, detector.Observe(missing), "missing reset data preserves detector state");
+            AssertEqual(3, detector.CurrentAvailableCount, "missing reset data preserves the last count");
+
+            UsageSnapshot none = CreateSnapshot(80, 70);
+            none.AvailableResetCount = 0;
+            AssertEqual(0, detector.Observe(none), "using resets does not produce a notification");
+            AssertEqual(0, detector.CurrentAvailableCount, "zero available resets updates the count");
+
+            UsageSnapshot replenished = CreateSnapshot(80, 70);
+            replenished.AvailableResetCount = 1;
+            AssertEqual(1, detector.Observe(replenished), "a later banked reset is detected");
+
+            BankedResetDetector restarted = new BankedResetDetector(detector.CreateState());
+            UsageSnapshot afterRestart = replenished.Clone();
+            afterRestart.AvailableResetCount = 2;
+            AssertEqual(
+                1,
+                restarted.Observe(afterRestart),
+                "a banked reset added while the app is closed is detected after restart");
+
+            string cachePath = Path.Combine(
+                Path.GetTempPath(),
+                "CodexUsageTray-banked-resets-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                BankedResetStateStore store = new BankedResetStateStore(cachePath);
+                store.Save(restarted.CreateState());
+                BankedResetDetector loaded = new BankedResetDetector(store.Load());
+                AssertEqual(
+                    0,
+                    loaded.Observe(afterRestart),
+                    "persisted banked reset state prevents duplicate startup notifications");
+            }
+            finally
+            {
+                if (File.Exists(cachePath))
+                {
+                    File.Delete(cachePath);
+                }
+            }
         }
 
         private static void TestAutomaticResetRedemptionPolicy()

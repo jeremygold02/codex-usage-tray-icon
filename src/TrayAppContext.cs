@@ -44,6 +44,8 @@ namespace CodexUsageTray
         private readonly Stopwatch refreshClock;
         private readonly CancellationTokenSource shutdownCancellation;
         private readonly UsageResetDetector usageResetDetector;
+        private readonly BankedResetStateStore bankedResetStateStore;
+        private readonly BankedResetDetector bankedResetDetector;
         private readonly UsageResetNotificationSuppression usageResetNotificationSuppression;
         private readonly bool showUsageOnStart;
         private readonly bool showSettingsOnStart;
@@ -84,6 +86,8 @@ namespace CodexUsageTray
             refreshClock = Stopwatch.StartNew();
             shutdownCancellation = new CancellationTokenSource();
             usageResetDetector = new UsageResetDetector();
+            bankedResetStateStore = new BankedResetStateStore();
+            bankedResetDetector = new BankedResetDetector(bankedResetStateStore.Load());
             usageResetNotificationSuppression = new UsageResetNotificationSuppression();
             dispatcher = new Control();
             dispatcher.CreateControl();
@@ -481,14 +485,19 @@ namespace CodexUsageTray
             UsageResetKind resets = usageResetNotificationSuppression.Filter(
                 usageResetDetector.Observe(snapshot),
                 DateTime.UtcNow);
+            int bankedResetsAdded = bankedResetDetector.Observe(snapshot);
+            bankedResetStateStore.Save(bankedResetDetector.CreateState());
             lastSuccessfulSnapshot = snapshot.Clone();
             currentSnapshot = snapshot.Clone();
             RenderDataSnapshot(
                 currentSnapshot,
                 true,
                 true,
-                showBalloon && resets == UsageResetKind.None);
+                showBalloon && resets == UsageResetKind.None && bankedResetsAdded == 0);
             ShowUsageResetNotification(resets);
+            ShowBankedResetNotification(
+                bankedResetsAdded,
+                bankedResetDetector.CurrentAvailableCount);
             EvaluateAutomaticResetRedemption(snapshot);
         }
 
@@ -929,6 +938,27 @@ namespace CodexUsageTray
                 5000,
                 "Codex Usage Reset",
                 message,
+                ToolTipIcon.Info);
+        }
+
+        private void ShowBankedResetNotification(int addedCount, int availableCount)
+        {
+            if (addedCount <= 0)
+            {
+                return;
+            }
+
+            string added = addedCount == 1
+                ? "A new limit reset was added."
+                : addedCount.ToString() +
+                    " new limit resets were added.";
+            string total = availableCount.ToString() +
+                (availableCount == 1 ? " banked reset is" : " banked resets are") +
+                " now available.";
+            notifyIcon.ShowBalloonTip(
+                5000,
+                "Codex Limit Reset Banked",
+                added + " " + total,
                 ToolTipIcon.Info);
         }
 
