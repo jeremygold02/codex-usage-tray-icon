@@ -212,10 +212,9 @@ namespace CodexUsageTray
             double consumed = lastWindow.UsedPercent - GetWindow(periodSamples[start], weekly).UsedPercent;
             if (consumed <= 0) return "No usage increase in recent history";
             double remainingHours = (100 - limit.UsedPercent) * hours / consumed;
-            string forecast = "\u2248" + FormatDuration(remainingHours) + " left at current pace";
             if (window.ResetAtUtc.HasValue && remainingHours >= (window.ResetAtUtc.Value - nowUtc).TotalHours)
-                forecast += " (resets sooner)";
-            return forecast;
+                return "Will last until reset";
+            return "\u2248" + FormatDuration(remainingHours) + " left at current pace";
         }
 
         private static string GetInitialForecast(bool weekly, UsageSnapshot snapshot, DateTime nowUtc,
@@ -239,9 +238,8 @@ namespace CodexUsageTray
             }
             if (limit.UsedPercent <= 0) return "No usage yet this cycle";
             double remainingHours = (100 - limit.UsedPercent) * elapsed / (limit.UsedPercent * 3600);
-            string forecast = "\u2248" + FormatDuration(remainingHours) + " left at cycle average";
-            if (remainingHours >= (reset - nowUtc).TotalHours) forecast += " (resets sooner)";
-            return forecast;
+            if (remainingHours >= (reset - nowUtc).TotalHours) return "Will last until reset";
+            return "\u2248" + FormatDuration(remainingHours) + " left at cycle average";
         }
 
         private static string FormatDuration(double hours)

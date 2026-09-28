@@ -7,6 +7,7 @@ namespace CodexUsageTray.Tests
     {
         private static int failures;
 
+        [STAThread]
         private static int Main(string[] args)
         {
             if (args == null || args.Length != 1)
@@ -28,6 +29,7 @@ namespace CodexUsageTray.Tests
             TestAutomaticResetRedemptionPolicy();
             UsageHistoryTests.Run();
             UsageFeaturesTests.Run();
+            UsageHistoryFormTests.Run();
             ClaudeUsageTests.Run();
             CodexHistoryImporterTests.Run();
 

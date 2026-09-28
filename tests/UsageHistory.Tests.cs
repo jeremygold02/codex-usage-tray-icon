@@ -84,7 +84,7 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddMinutes(-15), 37.5, reset));
             store.Observe(latest);
             Assert(store.GetForecast(false, latest, now) == "\u22481 hour left at current pace", "observed 50 percent per hour forecasts one hour");
-            Assert(store.GetForecast(true, latest, now).Contains("at cycle average"), "short observation history falls back to the cycle average");
+            Assert(store.GetForecast(true, latest, now) == "Will last until reset", "cycle average is capped by the reset");
             Assert(store.GetForecast(false, latest, now.AddMinutes(31)) == "Refresh usage for an estimate", "old observations do not yield forecasts");
 
             store.Clear();
@@ -93,7 +93,11 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddMinutes(-15), 37.5, reset));
             latest = Snapshot(now, 50, reset);
             store.Observe(latest);
-            Assert(store.GetForecast(false, latest, now) == "\u22481 hour left at current pace (resets sooner)", "earlier reset preserves the consumption-based duration");
+            Assert(store.GetForecast(false, latest, now) == "Will last until reset", "earlier reset replaces the depletion duration");
+            latest.FiveHour.ResetAfterSeconds = 3600;
+            Assert(store.GetForecast(false, latest, now) == "Will last until reset", "depletion exactly at reset lasts until reset");
+            latest.FiveHour.ResetAfterSeconds = 3601;
+            Assert(store.GetForecast(false, latest, now) == "\u22481 hour left at current pace", "depletion before reset retains its duration");
 
             store.Clear();
             reset = now.AddHours(4);
@@ -153,7 +157,7 @@ namespace CodexUsageTray.Tests
             latest.Weekly.ResetAfterSeconds = null;
             Assert(store.GetForecast(true, latest, now) == "\u22484 days left at current pace", "depletion uses observed consumption rather than time until reset");
             latest.Weekly.ResetAfterSeconds = 2 * 86400;
-            Assert(store.GetForecast(true, latest, now) == "\u22484 days left at current pace (resets sooner)", "scheduled reset is supplementary to the estimate");
+            Assert(store.GetForecast(true, latest, now) == "Will last until reset", "weekly estimate is capped by its actual reset deadline");
             latest.Weekly.ResetAfterSeconds = 0;
             Assert(store.GetForecast(true, latest, now) == "Awaiting reset update", "expired reset needs a fresh reading");
         }
@@ -203,6 +207,13 @@ namespace CodexUsageTray.Tests
             UsageSnapshot snapshot = Snapshot(now, 20, now.AddDays(6));
             Assert(store.GetForecast(true, snapshot, now) == "\u22484 days left at cycle average",
                 "first reading of 20 percent in one day estimates four days without learning");
+            snapshot.Weekly.UsedPercent = 10;
+            Assert(store.GetForecast(true, snapshot, now) == "Will last until reset",
+                "initial weekly estimate beyond reset uses the survival label");
+            snapshot.FiveHour.UsedPercent = 20;
+            snapshot.FiveHour.ResetAfterSeconds = 4 * 3600;
+            Assert(store.GetForecast(false, snapshot, now) == "Will last until reset",
+                "initial five-hour estimate exactly at reset uses the survival label");
             snapshot.Weekly.UsedPercent = 0;
             Assert(store.GetForecast(true, snapshot, now) == "No usage yet this cycle", "zero consumption has no invented depletion");
             snapshot.Weekly.UsedPercent = 20;

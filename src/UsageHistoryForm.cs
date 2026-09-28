@@ -68,8 +68,8 @@ namespace CodexUsageTray
             tabs.AutoSize = true;
             tabs.Dock = DockStyle.Fill;
             tabs.Margin = new Padding(0, 0, 0, 8);
-            weeklyButton = CreatePeriodButton("&Weekly", "Weekly usage: last seven days");
-            fiveHourButton = CreatePeriodButton("&5-hour", "Five-hour usage: last five hours");
+            weeklyButton = CreatePeriodButton("&Weekly", "Weekly limit: all recorded history");
+            fiveHourButton = CreatePeriodButton("&5-hour", "Five-hour limit: all recorded history");
             tabs.Controls.Add(weeklyButton);
             tabs.Controls.Add(fiveHourButton);
             Button clearButton = new Button();
@@ -94,7 +94,7 @@ namespace CodexUsageTray
             detailLabel.AccessibleName = "Selected usage reading";
             forecastLabel = CreateLabel("");
             forecastLabel.AccessibleName = "Estimated usage remaining";
-            Label legend = CreateLabel("Dotted lines: reset or usage adjustment observed. Gaps: missing observations. Times are local.");
+            Label legend = CreateLabel("Dashed segments: gaps between readings. Vertical dotted lines: reset or adjustment. Times are local.");
             legend.Margin = new Padding(0, 8, 0, 0);
 
             layout.Controls.Add(tabs, 0, 0);
@@ -287,19 +287,26 @@ namespace CodexUsageTray
                     : null;
                 weekly = showWeekly;
                 endUtc = nowUtc;
-                startUtc = nowUtc - (weekly ? TimeSpan.FromDays(7) : TimeSpan.FromHours(5));
+                startUtc = nowUtc;
                 samples.Clear();
                 if (values != null)
                 {
                     for (int i = 0; i < values.Count; i++)
                     {
                         UsageHistorySample sample = values[i];
-                        if (sample != null && sample.TimestampUtc >= startUtc && sample.TimestampUtc <= endUtc)
+                        if (sample != null && sample.TimestampUtc <= endUtc &&
+                            UsageHistoryStore.GetWindow(sample, weekly) != null)
                         {
                             samples.Add(sample);
                         }
                     }
                 }
+                samples.Sort(delegate(UsageHistorySample left, UsageHistorySample right)
+                {
+                    return left.TimestampUtc.CompareTo(right.TimestampUtc);
+                });
+                if (samples.Count > 0) startUtc = samples[0].TimestampUtc;
+                if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
                 int retainedIndex = -1;
                 if (selectedTimestamp.HasValue)
                 {
@@ -340,8 +347,9 @@ namespace CodexUsageTray
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 float scale = graphics.DpiX / 96.0f;
                 float labelHeight = Math.Max(Font.Height + 4, 18 * scale);
+                bool showDates = startUtc.ToLocalTime().Date != endUtc.ToLocalTime().Date;
                 plot = new RectangleF(48 * scale, labelHeight + 4 * scale,
-                    Math.Max(1, Width - 64 * scale), Math.Max(1, Height - labelHeight * 3 - 8 * scale));
+                    Math.Max(1, Width - 64 * scale), Math.Max(1, Height - labelHeight * (showDates ? 4 : 3) - 8 * scale));
                 Color muted = SystemInformation.HighContrast ? SystemColors.WindowText :
                     dark ? Color.Gainsboro : Color.FromArgb(72, 72, 72);
                 Color grid = SystemInformation.HighContrast ? SystemColors.WindowText :
@@ -359,24 +367,30 @@ namespace CodexUsageTray
                         DrawText(graphics, percent.ToString(CultureInfo.CurrentCulture) + "%",
                             new RectangleF(0, y - labelHeight / 2, plot.Left - 6 * scale, labelHeight), muted, true);
                     }
-                    for (int tick = 0; tick <= 4; tick++)
+                    for (int tick = 0; samples.Count > 0 && tick <= 4; tick++)
                     {
                         float x = plot.Left + plot.Width * tick / 4.0f;
                         graphics.DrawLine(gridPen, x, plot.Bottom, x, plot.Bottom + 4 * scale);
                         DateTime time = startUtc + TimeSpan.FromTicks((endUtc - startUtc).Ticks * tick / 4);
-                        string label = time.ToLocalTime().ToString(weekly ? "MMM d" : "t", CultureInfo.CurrentCulture);
+                        DateTime local = time.ToLocalTime();
+                        string label = local.ToString(showDates ? "MMM d" : "t", CultureInfo.CurrentCulture);
                         float width = Math.Min(88 * scale, plot.Width / 4);
                         float left = Math.Max(plot.Left, Math.Min(plot.Right - width, x - width / 2));
                         DrawText(graphics, label, new RectangleF(left, plot.Bottom + 6 * scale, width, labelHeight), muted, false);
+                        if (showDates)
+                            DrawText(graphics, local.ToString("t", CultureInfo.CurrentCulture),
+                                new RectangleF(left, plot.Bottom + 6 * scale + labelHeight, width, labelHeight), muted, false);
                     }
                 }
 
                 int validCount = 0;
                 using (Pen linePen = new Pen(line, Math.Max(1.5f, 2 * scale)))
+                using (Pen gapPen = new Pen(line, Math.Max(1.5f, 2 * scale)))
                 using (Pen resetPen = new Pen(muted, Math.Max(1, scale)))
                 using (Brush pointBrush = new SolidBrush(line))
                 {
                     resetPen.DashStyle = DashStyle.Dot;
+                    gapPen.DashStyle = DashStyle.Dash;
                     for (int i = 0; i < samples.Count; i++)
                     {
                         UsageHistoryWindow window = UsageHistoryStore.GetWindow(samples[i], weekly);
@@ -386,9 +400,10 @@ namespace CodexUsageTray
                         }
                         validCount++;
                         PointF point = GetPoint(samples[i], window);
-                        if (i > 0 && UsageHistoryStore.IsContinuous(samples[i - 1], samples[i], weekly))
+                        if (i > 0 && !UsageHistoryStore.IsReset(samples[i - 1], samples[i], weekly))
                         {
-                            graphics.DrawLine(linePen,
+                            Pen segmentPen = UsageHistoryStore.IsContinuous(samples[i - 1], samples[i], weekly) ? linePen : gapPen;
+                            graphics.DrawLine(segmentPen,
                                 GetPoint(samples[i - 1], UsageHistoryStore.GetWindow(samples[i - 1], weekly)), point);
                         }
                         if (i > 0 && UsageHistoryStore.IsReset(samples[i - 1], samples[i], weekly))
@@ -396,7 +411,7 @@ namespace CodexUsageTray
                             graphics.DrawLine(resetPen, point.X, plot.Top, point.X, plot.Bottom);
                             graphics.FillRectangle(pointBrush, point.X - 3 * scale, point.Y - 3 * scale, 6 * scale, 6 * scale);
                         }
-                        else
+                        else if (i == 0 || i == samples.Count - 1 || i == selectedIndex)
                         {
                             graphics.FillEllipse(pointBrush, point.X - 2 * scale, point.Y - 2 * scale, 4 * scale, 4 * scale);
                         }
@@ -413,7 +428,7 @@ namespace CodexUsageTray
                     {
                         graphics.FillRectangle(background, plot.Left + 1, plot.Top + 1, plot.Width - 2, plot.Height - 2);
                     }
-                    TextRenderer.DrawText(graphics, "No readings in this period yet.\nHistory starts with successful usage refreshes.",
+                    TextRenderer.DrawText(graphics, "No readings recorded yet.\nHistory starts with successful usage refreshes.",
                         Font, Rectangle.Round(plot), ForeColor,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
                 }
