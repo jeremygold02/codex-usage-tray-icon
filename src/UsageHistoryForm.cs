@@ -55,14 +55,12 @@ namespace CodexUsageTray
             layout.Dock = DockStyle.Fill;
             layout.Padding = new Padding(16, 12, 16, 12);
             layout.ColumnCount = 1;
-            layout.RowCount = 5;
+            layout.RowCount = 4;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            for (int i = 2; i < 5; i++)
-            {
-                layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            }
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             FlowLayoutPanel tabs = new FlowLayoutPanel();
             tabs.AutoSize = true;
@@ -90,18 +88,17 @@ namespace CodexUsageTray
             chart.Margin = new Padding(0);
             chart.SelectionChanged += ChartSelectionChanged;
             chart.TabIndex = 1;
-            detailLabel = CreateLabel("Hover over the chart, or focus it and use the arrow keys, for readings.");
+            detailLabel = CreateLabel("");
             detailLabel.AccessibleName = "Selected usage reading";
+            detailLabel.MinimumSize = new Size(0, Font.Height * 2 + 8);
+            detailLabel.Margin = new Padding(0, 8, 0, 0);
             forecastLabel = CreateLabel("");
             forecastLabel.AccessibleName = "Estimated usage remaining";
-            Label legend = CreateLabel("Dashed segments: gaps between readings. Vertical dotted lines: reset or adjustment. Times are local.");
-            legend.Margin = new Padding(0, 8, 0, 0);
 
             layout.Controls.Add(tabs, 0, 0);
             layout.Controls.Add(chart, 0, 1);
             layout.Controls.Add(detailLabel, 0, 2);
             layout.Controls.Add(forecastLabel, 0, 3);
-            layout.Controls.Add(legend, 0, 4);
             Controls.Add(layout);
             ApplySettings(settings);
             UpdateData(null);
@@ -121,10 +118,8 @@ namespace CodexUsageTray
             DateTime nowUtc = DateTime.UtcNow;
             bool weekly = weeklyButton.Checked;
             chart.UpdateData(history.Samples, weekly, nowUtc);
+            chart.UpdateProjection(history.GetProjection(weekly, snapshot, nowUtc));
             forecastLabel.Text = history.GetForecast(weekly, snapshot, nowUtc);
-            chart.AccessibleDescription = (weekly ? "Weekly" : "Five-hour") +
-                " remaining usage from zero to one hundred percent. " + forecastLabel.Text +
-                " Use Left and Right to inspect recorded readings.";
         }
 
         public void ApplySettings(AppSettings value)
@@ -219,7 +214,7 @@ namespace CodexUsageTray
         private void ChartSelectionChanged(object sender, EventArgs e)
         {
             detailLabel.Text = string.IsNullOrEmpty(chart.SelectedDetail)
-                ? "Hover over the chart, or focus it and use the arrow keys, for readings."
+                ? chart.LatestDetail
                 : chart.SelectedDetail;
         }
 
@@ -257,9 +252,10 @@ namespace CodexUsageTray
         private sealed class HistoryChart : Control
         {
             private readonly List<UsageHistorySample> samples = new List<UsageHistorySample>();
-            private readonly ToolTip toolTip = new ToolTip();
             private DateTime startUtc;
             private DateTime endUtc;
+            private DateTime observedEndUtc;
+            private UsageProjection projection;
             private bool weekly;
             private bool dark;
             private int selectedIndex = -1;
@@ -267,6 +263,10 @@ namespace CodexUsageTray
 
             public event EventHandler SelectionChanged;
             public string SelectedDetail { get; private set; }
+            public string LatestDetail
+            {
+                get { return samples.Count == 0 ? "No recorded readings" : "Latest: " + FormatDetail(samples.Count - 1); }
+            }
 
             public HistoryChart()
             {
@@ -276,8 +276,6 @@ namespace CodexUsageTray
                 TabStop = true;
                 AccessibleName = "Remaining usage history chart";
                 AccessibleRole = AccessibleRole.Graphic;
-                toolTip.AutoPopDelay = 15000;
-                toolTip.ShowAlways = true;
             }
 
             public void UpdateData(List<UsageHistorySample> values, bool showWeekly, DateTime nowUtc)
@@ -286,6 +284,8 @@ namespace CodexUsageTray
                     ? (DateTime?)samples[selectedIndex].TimestampUtc
                     : null;
                 weekly = showWeekly;
+                projection = null;
+                observedEndUtc = nowUtc;
                 endUtc = nowUtc;
                 startUtc = nowUtc;
                 samples.Clear();
@@ -321,7 +321,24 @@ namespace CodexUsageTray
                     }
                 }
                 selectedIndex = -1;
-                SelectSample(retainedIndex, false);
+                SelectSample(retainedIndex);
+                Invalidate();
+            }
+
+            public void UpdateProjection(UsageProjection value)
+            {
+                projection = null;
+                if (value != null && samples.Count > 0)
+                {
+                    UsageHistorySample latest = samples[samples.Count - 1];
+                    UsageHistoryWindow window = UsageHistoryStore.GetWindow(latest, weekly);
+                    if (Math.Abs((latest.TimestampUtc - value.StartUtc).TotalSeconds) <= 1 &&
+                        Math.Abs(100 - window.UsedPercent - value.StartRemainingPercent) < 0.001 &&
+                        value.EndUtc > value.StartUtc)
+                        projection = value;
+                }
+                endUtc = projection != null && projection.EndUtc > observedEndUtc ? projection.EndUtc : observedEndUtc;
+                if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
                 Invalidate();
             }
 
@@ -329,15 +346,6 @@ namespace CodexUsageTray
             {
                 dark = isDark;
                 Invalidate();
-            }
-
-            protected override void Dispose(bool disposing)
-            {
-                if (disposing)
-                {
-                    toolTip.Dispose();
-                }
-                base.Dispose(disposing);
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -356,7 +364,16 @@ namespace CodexUsageTray
                     dark ? Color.FromArgb(90, 90, 90) : Color.FromArgb(195, 195, 195);
                 Color line = SystemInformation.HighContrast ? SystemColors.Highlight :
                     dark ? Color.FromArgb(100, 195, 255) : Color.FromArgb(0, 104, 180);
+                Color projectionColor = SystemInformation.HighContrast ? SystemColors.WindowText :
+                    dark ? Color.FromArgb(242, 178, 77) : Color.FromArgb(160, 89, 0);
                 DrawText(graphics, "Remaining", new RectangleF(0, 0, Width, labelHeight), muted, false);
+                if (projection != null)
+                {
+                    PointF projectedStart = GetChartPoint(projection.StartUtc, projection.StartRemainingPercent);
+                    using (Brush tint = new SolidBrush(Color.FromArgb(18, projectionColor)))
+                        graphics.FillRectangle(tint, projectedStart.X, plot.Top, Math.Max(0, plot.Right - projectedStart.X), plot.Height);
+                    DrawText(graphics, "Projected", new RectangleF(plot.Right - 100 * scale, 0, 100 * scale, labelHeight), projectionColor, true);
+                }
 
                 using (Pen gridPen = new Pen(grid, 1))
                 {
@@ -383,14 +400,33 @@ namespace CodexUsageTray
                     }
                 }
 
+                if (projection != null)
+                {
+                    PointF projectedStart = GetChartPoint(projection.StartUtc, projection.StartRemainingPercent);
+                    PointF projectedEnd = GetChartPoint(projection.EndUtc, projection.EndRemainingPercent);
+                    using (Pen projectionPen = new Pen(projectionColor, Math.Max(1.5f, 2 * scale)))
+                    {
+                        projectionPen.DashStyle = DashStyle.Dash;
+                        graphics.DrawLine(projectionPen, projectedStart, projectedEnd);
+                        projectionPen.DashStyle = DashStyle.Solid;
+                        graphics.DrawEllipse(projectionPen, projectedEnd.X - 3 * scale, projectedEnd.Y - 3 * scale, 6 * scale, 6 * scale);
+                    }
+                }
+
                 int validCount = 0;
                 using (Pen linePen = new Pen(line, Math.Max(1.5f, 2 * scale)))
                 using (Pen gapPen = new Pen(line, Math.Max(1.5f, 2 * scale)))
+                using (Pen guidePen = new Pen(SystemInformation.HighContrast ? line : Color.FromArgb(160, line), Math.Max(1, scale)))
                 using (Pen resetPen = new Pen(muted, Math.Max(1, scale)))
                 using (Brush pointBrush = new SolidBrush(line))
                 {
                     resetPen.DashStyle = DashStyle.Dot;
                     gapPen.DashStyle = DashStyle.Dash;
+                    if (selectedIndex >= 0 && selectedIndex < samples.Count)
+                    {
+                        PointF selected = GetPoint(samples[selectedIndex], UsageHistoryStore.GetWindow(samples[selectedIndex], weekly));
+                        graphics.DrawLine(guidePen, selected.X, plot.Top, selected.X, plot.Bottom);
+                    }
                     for (int i = 0; i < samples.Count; i++)
                     {
                         UsageHistoryWindow window = UsageHistoryStore.GetWindow(samples[i], weekly);
@@ -432,10 +468,6 @@ namespace CodexUsageTray
                         Font, Rectangle.Round(plot), ForeColor,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
                 }
-                if (Focused)
-                {
-                    ControlPaint.DrawFocusRectangle(graphics, Rectangle.Inflate(ClientRectangle, -1, -1), ForeColor, BackColor);
-                }
             }
 
             protected override void OnMouseMove(MouseEventArgs e)
@@ -443,11 +475,11 @@ namespace CodexUsageTray
                 base.OnMouseMove(e);
                 if (!plot.Contains(e.Location))
                 {
-                    SelectSample(-1, false);
+                    SelectSample(-1);
                     return;
                 }
                 int nearest = -1;
-                double distance = 14.0 * Math.Max(1, plot.Width / 550.0);
+                double distance = double.MaxValue;
                 for (int i = 0; i < samples.Count; i++)
                 {
                     UsageHistoryWindow window = UsageHistoryStore.GetWindow(samples[i], weekly);
@@ -462,17 +494,13 @@ namespace CodexUsageTray
                         nearest = i;
                     }
                 }
-                SelectSample(nearest, true);
+                SelectSample(nearest);
             }
 
             protected override void OnMouseLeave(EventArgs e)
             {
                 base.OnMouseLeave(e);
-                toolTip.SetToolTip(this, "");
-                if (!Focused)
-                {
-                    SelectSample(-1, false);
-                }
+                SelectSample(-1);
             }
 
             protected override void OnMouseDown(MouseEventArgs e)
@@ -507,7 +535,7 @@ namespace CodexUsageTray
                 while (next >= 0 && next < samples.Count && UsageHistoryStore.GetWindow(samples[next], weekly) == null);
                 if (next >= 0 && next < samples.Count)
                 {
-                    SelectSample(next, false);
+                    SelectSample(next);
                 }
                 e.Handled = true;
                 e.SuppressKeyPress = true;
@@ -516,38 +544,37 @@ namespace CodexUsageTray
             protected override void OnGotFocus(EventArgs e)
             {
                 base.OnGotFocus(e);
-                Invalidate();
+                if (selectedIndex < 0 && samples.Count > 0) SelectSample(samples.Count - 1);
             }
 
             protected override void OnLostFocus(EventArgs e)
             {
                 base.OnLostFocus(e);
-                Invalidate();
+                SelectSample(-1);
             }
 
-            private void SelectSample(int index, bool showTooltip)
+            private string FormatDetail(int index)
+            {
+                UsageHistorySample sample = samples[index];
+                UsageHistoryWindow window = UsageHistoryStore.GetWindow(sample, weekly);
+                string detail = sample.TimestampUtc.ToLocalTime().ToString("G", CultureInfo.CurrentCulture) +
+                    Environment.NewLine + (100 - window.UsedPercent).ToString("0.#", CultureInfo.CurrentCulture) +
+                    "% remaining  |  " + window.UsedPercent.ToString("0.#", CultureInfo.CurrentCulture) + "% used";
+                if (index > 0 && UsageHistoryStore.IsReset(samples[index - 1], sample, weekly))
+                    detail += "  |  Reset or adjustment";
+                return detail;
+            }
+
+            private void SelectSample(int index)
             {
                 if (index == selectedIndex && index >= 0)
                 {
-                    toolTip.SetToolTip(this, showTooltip ? SelectedDetail : "");
                     return;
                 }
                 selectedIndex = index;
-                SelectedDetail = "";
-                if (index >= 0)
-                {
-                    UsageHistorySample sample = samples[index];
-                    UsageHistoryWindow window = UsageHistoryStore.GetWindow(sample, weekly);
-                    SelectedDetail = sample.TimestampUtc.ToLocalTime().ToString("G", CultureInfo.CurrentCulture) +
-                        "  |  " + (100 - window.UsedPercent).ToString("0.#", CultureInfo.CurrentCulture) + "% remaining";
-                    if (index > 0 && UsageHistoryStore.IsReset(samples[index - 1], sample, weekly))
-                    {
-                        SelectedDetail += "  |  Reset or usage adjustment observed by this reading";
-                    }
-                }
-                toolTip.SetToolTip(this, showTooltip ? SelectedDetail : "");
+                SelectedDetail = index < 0 ? "" : FormatDetail(index);
                 AccessibleDescription = string.IsNullOrEmpty(SelectedDetail)
-                    ? "Remaining usage history. Use Left and Right to inspect recorded readings."
+                    ? LatestDetail + ". Use Left and Right to inspect recorded readings."
                     : SelectedDetail;
                 EventHandler handler = SelectionChanged;
                 if (handler != null)
@@ -559,8 +586,13 @@ namespace CodexUsageTray
 
             private PointF GetPoint(UsageHistorySample sample, UsageHistoryWindow window)
             {
-                double fraction = (sample.TimestampUtc - startUtc).TotalSeconds / (endUtc - startUtc).TotalSeconds;
-                double remaining = Math.Max(0, Math.Min(100, 100 - window.UsedPercent));
+                return GetChartPoint(sample.TimestampUtc, 100 - window.UsedPercent);
+            }
+
+            private PointF GetChartPoint(DateTime timestamp, double remainingPercent)
+            {
+                double fraction = (timestamp - startUtc).TotalSeconds / (endUtc - startUtc).TotalSeconds;
+                double remaining = Math.Max(0, Math.Min(100, remainingPercent));
                 return new PointF(plot.Left + (float)(plot.Width * fraction),
                     plot.Bottom - (float)(plot.Height * remaining / 100));
             }

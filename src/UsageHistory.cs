@@ -40,6 +40,15 @@ namespace CodexUsageTray
         }
     }
 
+    internal sealed class UsageProjection
+    {
+        public DateTime StartUtc;
+        public DateTime EndUtc;
+        public double StartRemainingPercent;
+        public double EndRemainingPercent;
+        public bool EndsAtReset;
+    }
+
     internal sealed class UsageHistoryStore
     {
         private const int MaxSamples = 45000;
@@ -183,14 +192,59 @@ namespace CodexUsageTray
             if (window.ResetAtUtc.HasValue && window.ResetAtUtc.Value <= nowUtc) return "Awaiting reset update";
             List<UsageHistorySample> periodSamples = samples.FindAll(
                 delegate(UsageHistorySample sample) { return GetWindow(sample, weekly) != null; });
-            if (periodSamples.Count < 3) return GetInitialForecast(weekly, snapshot, nowUtc, periodSamples);
+            double ratePerHour;
+            if (!TryGetRecentRate(weekly, snapshot, periodSamples, out ratePerHour))
+                return GetInitialForecast(weekly, snapshot, periodSamples);
+            if (ratePerHour <= 0) return "No usage increase in recent history";
+            double remainingHours = (100 - limit.UsedPercent) / ratePerHour;
+            if (window.ResetAtUtc.HasValue && remainingHours >=
+                (window.ResetAtUtc.Value - snapshot.LastUpdated.ToUniversalTime()).TotalHours)
+                return "Will last until reset";
+            return "\u2248" + FormatDuration(remainingHours) + " left at current pace";
+        }
 
+        public UsageProjection GetProjection(bool weekly, UsageSnapshot snapshot, DateTime nowUtc)
+        {
+            nowUtc = nowUtc.ToUniversalTime();
+            if (!IsFresh(snapshot, nowUtc) || snapshot.IsRefreshing) return null;
+            LimitWindow limit = weekly ? snapshot.Weekly : snapshot.FiveHour;
+            if (limit == null || limit.UsedPercent >= 100 || !limit.ResetAfterSeconds.HasValue) return null;
+
+            DateTime startUtc = snapshot.LastUpdated.ToUniversalTime();
+            DateTime resetUtc = startUtc.AddSeconds(limit.ResetAfterSeconds.Value);
+            if (resetUtc <= nowUtc) return null;
+
+            List<UsageHistorySample> periodSamples = samples.FindAll(
+                delegate(UsageHistorySample sample) { return GetWindow(sample, weekly) != null; });
+            double ratePerHour;
+            if (!TryGetRecentRate(weekly, snapshot, periodSamples, out ratePerHour) &&
+                !TryGetCycleAverageRate(weekly, snapshot, periodSamples, out ratePerHour)) return null;
+
+            double remaining = 100 - limit.UsedPercent;
+            double hoursUntilReset = (resetUtc - startUtc).TotalHours;
+            bool endsAtReset = ratePerHour <= 0 || remaining / ratePerHour >= hoursUntilReset;
+            DateTime endUtc = endsAtReset ? resetUtc : startUtc.AddHours(remaining / ratePerHour);
+            return new UsageProjection
+            {
+                StartUtc = startUtc,
+                EndUtc = endUtc,
+                StartRemainingPercent = remaining,
+                EndRemainingPercent = endsAtReset ? Math.Max(0, remaining - ratePerHour * hoursUntilReset) : 0,
+                EndsAtReset = endsAtReset
+            };
+        }
+
+        private static bool TryGetRecentRate(bool weekly, UsageSnapshot snapshot,
+            List<UsageHistorySample> periodSamples, out double ratePerHour)
+        {
+            ratePerHour = 0;
+            if (periodSamples.Count < 3) return false;
+            LimitWindow limit = weekly ? snapshot.Weekly : snapshot.FiveHour;
             int end = periodSamples.Count - 1;
             UsageHistorySample last = periodSamples[end];
             UsageHistoryWindow lastWindow = GetWindow(last, weekly);
             if (lastWindow == null || Math.Abs((last.TimestampUtc - snapshot.LastUpdated.ToUniversalTime()).TotalSeconds) > 1 ||
-                Math.Abs(lastWindow.UsedPercent - limit.UsedPercent) > 0.001)
-                return GetInitialForecast(weekly, snapshot, nowUtc, periodSamples);
+                Math.Abs(lastWindow.UsedPercent - limit.UsedPercent) > 0.001) return false;
 
             DateTime cutoff = last.TimestampUtc.AddHours(weekly ? -48 : -1);
             int start = end;
@@ -207,26 +261,37 @@ namespace CodexUsageTray
             }
 
             double hours = (last.TimestampUtc - periodSamples[start].TimestampUtc).TotalHours;
-            if (end - start < 2 || hours < (weekly ? 6 : 0.25))
-                return GetInitialForecast(weekly, snapshot, nowUtc, periodSamples);
-            double consumed = lastWindow.UsedPercent - GetWindow(periodSamples[start], weekly).UsedPercent;
-            if (consumed <= 0) return "No usage increase in recent history";
-            double remainingHours = (100 - limit.UsedPercent) * hours / consumed;
-            if (window.ResetAtUtc.HasValue && remainingHours >= (window.ResetAtUtc.Value - nowUtc).TotalHours)
-                return "Will last until reset";
-            return "\u2248" + FormatDuration(remainingHours) + " left at current pace";
+            if (end - start < 2 || hours < (weekly ? 6 : 0.25)) return false;
+            ratePerHour = Math.Max(0,
+                (lastWindow.UsedPercent - GetWindow(periodSamples[start], weekly).UsedPercent) / hours);
+            return true;
         }
 
-        private static string GetInitialForecast(bool weekly, UsageSnapshot snapshot, DateTime nowUtc,
+        private static string GetInitialForecast(bool weekly, UsageSnapshot snapshot,
             List<UsageHistorySample> periodSamples)
         {
-            const string learning = "Learning usage pace...";
             LimitWindow limit = weekly ? snapshot.Weekly : snapshot.FiveHour;
-            if (!limit.ResetAfterSeconds.HasValue || !limit.WindowMinutes.HasValue) return learning;
+            double ratePerHour;
+            if (!TryGetCycleAverageRate(weekly, snapshot, periodSamples, out ratePerHour))
+                return "Learning usage pace...";
+            if (ratePerHour <= 0) return "No usage yet this cycle";
+            double remainingHours = (100 - limit.UsedPercent) / ratePerHour;
+            DateTime reset = snapshot.LastUpdated.ToUniversalTime().AddSeconds(limit.ResetAfterSeconds.Value);
+            if (remainingHours >= (reset - snapshot.LastUpdated.ToUniversalTime()).TotalHours)
+                return "Will last until reset";
+            return "\u2248" + FormatDuration(remainingHours) + " left at cycle average";
+        }
+
+        private static bool TryGetCycleAverageRate(bool weekly, UsageSnapshot snapshot,
+            List<UsageHistorySample> periodSamples, out double ratePerHour)
+        {
+            ratePerHour = 0;
+            LimitWindow limit = weekly ? snapshot.Weekly : snapshot.FiveHour;
+            if (!limit.ResetAfterSeconds.HasValue || !limit.WindowMinutes.HasValue) return false;
             double duration = limit.WindowMinutes.Value * 60.0;
             double elapsed = duration - limit.ResetAfterSeconds.Value;
             // OpenQuota's pacing approach: avoid projecting the very start of a window.
-            if (elapsed < Math.Max(60, duration * 0.01) || elapsed >= duration) return learning;
+            if (elapsed < Math.Max(60, duration * 0.01) || elapsed >= duration) return false;
             DateTime reset = snapshot.LastUpdated.ToUniversalTime().AddSeconds(limit.ResetAfterSeconds.Value);
             for (int i = periodSamples.Count - 1; i > 0; i--)
             {
@@ -234,12 +299,10 @@ namespace CodexUsageTray
                 if (!after.ResetAtUtc.HasValue || Math.Abs((after.ResetAtUtc.Value - reset).TotalMinutes) > 2) break;
                 if (HasMatchingReset(periodSamples[i - 1], periodSamples[i], weekly) &&
                     after.UsedPercent < GetWindow(periodSamples[i - 1], weekly).UsedPercent)
-                    return learning; // A banked reset invalidates the inferred cycle start.
+                    return false; // A banked reset invalidates the inferred cycle start.
             }
-            if (limit.UsedPercent <= 0) return "No usage yet this cycle";
-            double remainingHours = (100 - limit.UsedPercent) * elapsed / (limit.UsedPercent * 3600);
-            if (remainingHours >= (reset - nowUtc).TotalHours) return "Will last until reset";
-            return "\u2248" + FormatDuration(remainingHours) + " left at cycle average";
+            ratePerHour = limit.UsedPercent * 3600 / elapsed;
+            return true;
         }
 
         private static string FormatDuration(double hours)

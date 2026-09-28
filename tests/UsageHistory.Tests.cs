@@ -14,6 +14,7 @@ namespace CodexUsageTray.Tests
             {
                 TestPersistenceAndValidation(Path.Combine(directory, "history.json"));
                 TestForecasts(Path.Combine(directory, "forecast.json"));
+                TestProjections(Path.Combine(directory, "projection.json"));
                 TestGapsAndResets(Path.Combine(directory, "cycles.json"));
                 TestWeeklyDepletion(Path.Combine(directory, "weekly.json"));
                 TestCorruptHistory(Path.Combine(directory, "corrupt.json"));
@@ -106,6 +107,100 @@ namespace CodexUsageTray.Tests
             latest = Snapshot(now, 25, reset);
             store.Observe(latest);
             Assert(store.GetForecast(false, latest, now) == "No usage increase in recent history", "idle observations do not invent exhaustion");
+        }
+
+        private static void TestProjections(string path)
+        {
+            DateTime reading = DateTime.UtcNow.AddMinutes(-10);
+            DateTime queriedAt = reading.AddMinutes(5);
+            DateTime reset = reading.AddHours(4);
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            store.Observe(Snapshot(reading.AddMinutes(-30), 25, reset));
+            store.Observe(Snapshot(reading.AddMinutes(-15), 37.5, reset));
+            UsageSnapshot latest = Snapshot(reading, 50, reset);
+            store.Observe(latest);
+
+            UsageProjection projection = store.GetProjection(false, latest, queriedAt);
+            Assert(projection != null && projection.StartUtc == reading && projection.EndUtc == reading.AddHours(1) &&
+                projection.StartRemainingPercent == 50 && projection.EndRemainingPercent == 0 && !projection.EndsAtReset,
+                "observed pace starts at the actual reading and stops at depletion before reset");
+            latest.FiveHour.ResetAfterSeconds = null;
+            Assert(store.GetProjection(false, latest, queriedAt) == null,
+                "observed pace without a known reset deadline has no projection");
+
+            latest.FiveHour.ResetAfterSeconds = 1800;
+            projection = store.GetProjection(false, latest, queriedAt);
+            Assert(projection != null && projection.EndUtc == reading.AddMinutes(30) &&
+                projection.EndRemainingPercent == 25 && projection.EndsAtReset,
+                "projection stops at an earlier reset with positive remaining usage");
+            latest.FiveHour.ResetAfterSeconds = 3600;
+            projection = store.GetProjection(false, latest, queriedAt);
+            Assert(projection != null && projection.EndUtc == reading.AddHours(1) &&
+                projection.EndRemainingPercent == 0 && projection.EndsAtReset,
+                "depletion exactly at reset is marked as ending at reset");
+            latest.FiveHour.ResetAfterSeconds = 3601;
+            projection = store.GetProjection(false, latest, queriedAt);
+            Assert(projection != null && projection.EndUtc == reading.AddHours(1) && !projection.EndsAtReset &&
+                store.GetForecast(false, latest, queriedAt) == "\u22481 hour left at current pace",
+                "forecast and projection agree for a fresh reading taken before the query");
+
+            store.Clear();
+            store.Observe(Snapshot(reading.AddMinutes(-30), 25, reset));
+            store.Observe(Snapshot(reading.AddMinutes(-15), 25, reset));
+            latest = Snapshot(reading, 25, reset);
+            store.Observe(latest);
+            projection = store.GetProjection(false, latest, queriedAt);
+            Assert(projection != null && projection.EndUtc == reset &&
+                projection.StartRemainingPercent == 75 && projection.EndRemainingPercent == 75 && projection.EndsAtReset,
+                "known zero recent consumption stays flat through reset");
+
+            store.Clear();
+            store.Observe(Snapshot(reading.AddMinutes(-30), 25.0005, reset));
+            store.Observe(Snapshot(reading.AddMinutes(-15), 25.00025, reset));
+            latest = Snapshot(reading, 25, reset);
+            store.Observe(latest);
+            projection = store.GetProjection(false, latest, queriedAt);
+            Assert(projection != null && projection.EndUtc == reset &&
+                projection.EndRemainingPercent == 75 && projection.EndsAtReset,
+                "tiny measurement declines do not increase projected remaining usage");
+
+            store.Clear();
+            latest = Snapshot(reading, 20, reading.AddDays(6));
+            projection = store.GetProjection(true, latest, queriedAt);
+            Assert(projection != null && projection.StartUtc == reading && projection.EndUtc == reading.AddDays(4) &&
+                projection.StartRemainingPercent == 80 && projection.EndRemainingPercent == 0 && !projection.EndsAtReset,
+                "valid cycle average supplies a projection before history is sufficient");
+            latest.Weekly.UsedPercent = 10;
+            projection = store.GetProjection(true, latest, queriedAt);
+            Assert(projection != null && projection.EndUtc == reading.AddDays(6) &&
+                projection.EndRemainingPercent == 30 && projection.EndsAtReset,
+                "cycle average projection retains usage at reset");
+
+            latest.Weekly.ResetAfterSeconds = null;
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "unknown reset deadline has no projection");
+            latest.Weekly.ResetAfterSeconds = 7 * 86400 - 30;
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "insufficient rate information has no projection");
+            latest = Snapshot(reading, 20, reading.AddDays(6));
+            latest.IsRefreshing = true;
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "refresh in progress suppresses projection");
+            latest.IsRefreshing = false;
+            latest.IsPaused = true;
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "paused data suppresses projection");
+            latest.IsPaused = false;
+            latest.IsStale = true;
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "stale data suppresses projection");
+            latest.IsStale = false;
+            latest.ErrorMessage = "failed";
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "failed data suppresses projection");
+            latest.ErrorMessage = null;
+            latest.Weekly.UsedPercent = 100;
+            Assert(store.GetProjection(true, latest, queriedAt) == null, "exhausted usage has no projection");
+            latest.Weekly.UsedPercent = 20;
+            Assert(store.GetProjection(true, latest, reading.AddMinutes(31)) == null,
+                "expired reading has no projection");
+            latest.Weekly.ResetAfterSeconds = 60;
+            Assert(store.GetProjection(true, latest, queriedAt) == null,
+                "expired reset deadline has no projection");
         }
 
         private static void TestGapsAndResets(string path)
