@@ -78,6 +78,8 @@ namespace CodexUsageTray
         private ToolStripMenuItem claudeHistoryItem;
         private UsageSnapshot claudeSnapshot;
         private bool claudeRefreshInProgress;
+        private bool claudeRequestInProgress;
+        private readonly ClaudeQuotaClient claudeQuotaClient = new ClaudeQuotaClient();
         private bool historyImportStarted;
         private System.Windows.Forms.Timer startupUiTimer;
 
@@ -230,7 +232,7 @@ namespace CodexUsageTray
             ContextMenuStrip menu = new ContextMenuStrip();
 
             ToolStripMenuItem refresh = new ToolStripMenuItem("Refresh now");
-            refresh.Click += delegate { RefreshUsage(true); RefreshClaudeUsage(); };
+            refresh.Click += delegate { RefreshUsage(true); RefreshClaudeUsage(true); };
             menu.Items.Add(refresh);
 
             ToolStripMenuItem show = new ToolStripMenuItem("Show usage");
@@ -399,7 +401,7 @@ namespace CodexUsageTray
             RefreshScheduleChanged();
         }
 
-        private void RefreshClaudeUsage()
+        private void RefreshClaudeUsage(bool force = false)
         {
             if (shuttingDown || claudeRefreshInProgress) return;
             claudeRefreshInProgress = true;
@@ -407,10 +409,16 @@ namespace CodexUsageTray
             {
                 try
                 {
-                    UsageSnapshot candidate = ClaudeUsageSource.ReadSnapshot(ClaudeUsageSource.DefaultPath, DateTime.UtcNow);
-                    if (candidate == null || !ClaudeUsageSource.IsAuthenticated()) return null;
-                    // Recheck window expiry after authentication, which can time out.
-                    return ClaudeUsageSource.ReadSnapshot(ClaudeUsageSource.DefaultPath, DateTime.UtcNow);
+                    return claudeQuotaClient.Read(force, delegate
+                    {
+                        TryPostToUi(delegate
+                        {
+                            if (shuttingDown) return;
+                            claudeRequestInProgress = true;
+                            if (usagePopup != null && !usagePopup.IsDisposed)
+                                usagePopup.SetClaudeRefreshing(true);
+                        });
+                    });
                 }
                 catch { return null; }
             }).ContinueWith(delegate(Task<UsageSnapshot> task)
@@ -421,6 +429,7 @@ namespace CodexUsageTray
                 {
                     if (shuttingDown) return;
                     claudeRefreshInProgress = false;
+                    claudeRequestInProgress = false;
                     claudeSnapshot = result;
                     if (result != null) claudeHistory.Observe(result);
                     claudeHistoryItem.Visible = result != null;
@@ -430,7 +439,10 @@ namespace CodexUsageTray
                         else claudeHistoryForm.UpdateData(result);
                     }
                     if (usagePopup != null && !usagePopup.IsDisposed)
+                    {
+                        usagePopup.SetClaudeRefreshing(false);
                         usagePopup.UpdateClaudeSnapshot(result, claudeHistory);
+                    }
                 });
             });
         }
@@ -1742,6 +1754,7 @@ namespace CodexUsageTray
         {
             UsagePopup popup = new UsagePopup(settings, usageHistory);
             popup.UpdateClaudeSnapshot(claudeSnapshot, claudeHistory);
+            popup.SetClaudeRefreshing(claudeRequestInProgress);
             popup.HistoryRequested += delegate
             {
                 popup.Hide();
@@ -1750,7 +1763,7 @@ namespace CodexUsageTray
             };
             popup.RefreshRequested += delegate
             {
-                if (popup.IsShowingClaude) RefreshClaudeUsage();
+                if (popup.IsShowingClaude) RefreshClaudeUsage(true);
                 else RefreshUsage(false);
             };
             popup.SettingsRequested += delegate(object sender, EventArgs e)

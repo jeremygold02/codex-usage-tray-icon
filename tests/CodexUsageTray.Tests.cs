@@ -30,7 +30,9 @@ namespace CodexUsageTray.Tests
             UsageHistoryTests.Run();
             UsageFeaturesTests.Run();
             UsageHistoryFormTests.Run();
+            UsagePopupTests.Run();
             ClaudeUsageTests.Run();
+            ClaudeQuotaTests.Run();
             CodexHistoryImporterTests.Run();
 
             if (failures != 0)

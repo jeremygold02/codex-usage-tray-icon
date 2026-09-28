@@ -42,6 +42,7 @@ namespace CodexUsageTray
         private int currentDpi = 96;
         private int refreshAnimationAngle = -90;
         private bool refreshing;
+        private bool claudeRefreshing;
         private bool updatingLayout;
 
         public event EventHandler RefreshRequested;
@@ -163,6 +164,15 @@ namespace CodexUsageTray
             }
 
             refreshing = value;
+            UpdateActionButtonState();
+            UpdateLayoutMetrics(true);
+            Invalidate(true);
+        }
+
+        public void SetClaudeRefreshing(bool value)
+        {
+            if (claudeRefreshing == value) return;
+            claudeRefreshing = value;
             UpdateActionButtonState();
             UpdateLayoutMetrics(true);
             Invalidate(true);
@@ -490,7 +500,8 @@ namespace CodexUsageTray
                 titleTextBounds.Width = ScaleMetric(100);
 
             string headerDetail = null;
-            if ((settings == null || settings.ShowPopupLastUpdated) &&
+            if (IsRefreshActive()) headerDetail = "Refreshing...";
+            else if ((settings == null || settings.ShowPopupLastUpdated) &&
                 snapshot != null && snapshot.LastUpdated != DateTime.MinValue)
             {
                 headerDetail = "Updated " + TimeFormatter.FormatClock(snapshot.LastUpdated);
@@ -1118,7 +1129,7 @@ namespace CodexUsageTray
             refreshButton.Enabled = !active;
             refreshButton.Cursor = active ? Cursors.Default : Cursors.Hand;
             refreshButton.AccessibleName = active ? "Refreshing usage" :
-                showingClaude ? "Reload the latest Claude CLI reading" : "Refresh usage";
+                showingClaude ? "Refresh Claude account usage" : "Refresh usage";
             refreshButton.AccessibleDescription = refreshButton.AccessibleName;
             actionToolTip.SetToolTip(refreshButton, refreshButton.AccessibleName);
             refreshButton.Invalidate();
@@ -1126,7 +1137,7 @@ namespace CodexUsageTray
 
         private bool IsRefreshActive()
         {
-            return (!showingClaude && refreshing) || (snapshot != null && snapshot.IsRefreshing);
+            return (showingClaude ? claudeRefreshing : refreshing) || (snapshot != null && snapshot.IsRefreshing);
         }
 
         private void ApplyThemeColors()
