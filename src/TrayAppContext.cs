@@ -39,6 +39,10 @@ namespace CodexUsageTray
         private readonly System.Windows.Forms.Timer refreshTimer;
         private readonly System.Windows.Forms.Timer autoRedemptionTimer;
         private readonly System.Windows.Forms.Timer activityTimer;
+        private readonly System.Windows.Forms.Timer resetReminderTimer;
+        private readonly ResetExpiryReminder resetExpiryReminder;
+        private readonly UsageHistoryStore usageHistory;
+        private readonly UsageHistoryStore claudeHistory;
         private readonly Control dispatcher;
         private readonly AppSettings settings;
         private readonly Stopwatch refreshClock;
@@ -69,6 +73,12 @@ namespace CodexUsageTray
         private string updateStatusText = "";
         private string lastAutoRedemptionError;
         private SettingsForm settingsForm;
+        private UsageHistoryForm historyForm;
+        private UsageHistoryForm claudeHistoryForm;
+        private ToolStripMenuItem claudeHistoryItem;
+        private UsageSnapshot claudeSnapshot;
+        private bool claudeRefreshInProgress;
+        private bool historyImportStarted;
         private System.Windows.Forms.Timer startupUiTimer;
 
         [DllImport("user32.dll")]
@@ -92,6 +102,10 @@ namespace CodexUsageTray
             dispatcher = new Control();
             dispatcher.CreateControl();
             settings = AppSettings.Load();
+            usageHistory = new UsageHistoryStore(UsageHistoryStore.DefaultPath);
+            claudeHistory = new UsageHistoryStore(Path.Combine(
+                Path.GetDirectoryName(UsageHistoryStore.DefaultPath), "claude-usage-history.json"));
+            resetExpiryReminder = new ResetExpiryReminder(ResetExpiryReminder.DefaultPath);
             usagePopup = CreateUsagePopup();
 
             notifyIcon = new NotifyIcon();
@@ -127,13 +141,28 @@ namespace CodexUsageTray
             };
 
             codexRunning = CodexActivityMonitor.IsCodexRunning();
+            resetReminderTimer = new System.Windows.Forms.Timer();
+            resetReminderTimer.Tick += delegate
+            {
+                resetReminderTimer.Stop();
+                if (shuttingDown || !settings.ResetExpiryReminders) return;
+                if (refreshInProgress || autoRedemptionInProgress)
+                {
+                    ArmResetReminderTimer(5000);
+                    return;
+                }
+                // Revalidate the credit before notifying, even when idle polling is off.
+                RefreshUsage(false);
+            };
+
             activityTimer = new System.Windows.Forms.Timer();
             activityTimer.Interval = ActivityPollSeconds * 1000;
-            activityTimer.Tick += delegate { PollCodexActivity(); };
+            activityTimer.Tick += delegate { PollCodexActivity(); RefreshClaudeUsage(); };
             activityTimer.Start();
 
+            RefreshClaudeUsage();
             RefreshUsageIfDue(false);
-            if (settings.AutoRedeemResetCredits &&
+            if ((settings.AutoRedeemResetCredits || settings.ResetExpiryReminders) &&
                 !refreshInProgress &&
                 lastSuccessfulSnapshot == null)
             {
@@ -201,12 +230,21 @@ namespace CodexUsageTray
             ContextMenuStrip menu = new ContextMenuStrip();
 
             ToolStripMenuItem refresh = new ToolStripMenuItem("Refresh now");
-            refresh.Click += delegate { RefreshUsage(true); };
+            refresh.Click += delegate { RefreshUsage(true); RefreshClaudeUsage(); };
             menu.Items.Add(refresh);
 
             ToolStripMenuItem show = new ToolStripMenuItem("Show usage");
             show.Click += delegate { ShowUsagePopup(); };
             menu.Items.Add(show);
+
+            ToolStripMenuItem historyItem = new ToolStripMenuItem("Usage history");
+            historyItem.Click += delegate { ShowUsageHistory(); };
+            menu.Items.Add(historyItem);
+
+            claudeHistoryItem = new ToolStripMenuItem("Claude usage history");
+            claudeHistoryItem.Visible = false;
+            claudeHistoryItem.Click += delegate { ShowClaudeHistory(); };
+            menu.Items.Add(claudeHistoryItem);
 
             ToolStripMenuItem settingsItem = new ToolStripMenuItem("Settings");
             settingsItem.Click += delegate { ShowSettings(); };
@@ -361,6 +399,42 @@ namespace CodexUsageTray
             RefreshScheduleChanged();
         }
 
+        private void RefreshClaudeUsage()
+        {
+            if (shuttingDown || claudeRefreshInProgress) return;
+            claudeRefreshInProgress = true;
+            Task.Factory.StartNew(delegate
+            {
+                try
+                {
+                    UsageSnapshot candidate = ClaudeUsageSource.ReadSnapshot(ClaudeUsageSource.DefaultPath, DateTime.UtcNow);
+                    if (candidate == null || !ClaudeUsageSource.IsAuthenticated()) return null;
+                    // Recheck freshness after authentication, which can time out.
+                    return ClaudeUsageSource.ReadSnapshot(ClaudeUsageSource.DefaultPath, DateTime.UtcNow);
+                }
+                catch { return null; }
+            }).ContinueWith(delegate(Task<UsageSnapshot> task)
+            {
+                UsageSnapshot result = task.Status == TaskStatus.RanToCompletion ? task.Result : null;
+                if (task.IsFaulted) task.Exception.Handle(delegate { return true; });
+                TryPostToUi(delegate
+                {
+                    if (shuttingDown) return;
+                    claudeRefreshInProgress = false;
+                    claudeSnapshot = result;
+                    if (result != null) claudeHistory.Observe(result);
+                    claudeHistoryItem.Visible = result != null;
+                    if (claudeHistoryForm != null && !claudeHistoryForm.IsDisposed)
+                    {
+                        if (result == null) claudeHistoryForm.Close();
+                        else claudeHistoryForm.UpdateData(result);
+                    }
+                    if (usagePopup != null && !usagePopup.IsDisposed)
+                        usagePopup.UpdateClaudeSnapshot(result, claudeHistory);
+                });
+            });
+        }
+
         private void RefreshScheduleChanged()
         {
             refreshTimer.Stop();
@@ -482,6 +556,7 @@ namespace CodexUsageTray
             snapshot.IsRefreshing = false;
             snapshot.IsPaused = false;
 
+            usageHistory.Observe(snapshot);
             UsageResetKind resets = usageResetNotificationSuppression.Filter(
                 usageResetDetector.Observe(snapshot),
                 DateTime.UtcNow);
@@ -489,6 +564,7 @@ namespace CodexUsageTray
             bankedResetStateStore.Save(bankedResetDetector.CreateState());
             lastSuccessfulSnapshot = snapshot.Clone();
             currentSnapshot = snapshot.Clone();
+            ImportCodexHistory(snapshot);
             RenderDataSnapshot(
                 currentSnapshot,
                 true,
@@ -498,7 +574,36 @@ namespace CodexUsageTray
             ShowBankedResetNotification(
                 bankedResetsAdded,
                 bankedResetDetector.CurrentAvailableCount);
+            UpdateResetExpiryReminders(snapshot);
             EvaluateAutomaticResetRedemption(snapshot);
+        }
+
+        private void ImportCodexHistory(UsageSnapshot snapshot)
+        {
+            if (historyImportStarted || usageHistory.ImportCompleted) return;
+            historyImportStarted = true;
+            UsageSnapshot initial = snapshot.Clone();
+            CancellationToken cancellation = shutdownCancellation.Token;
+            Task.Factory.StartNew(delegate
+            {
+                return CodexHistoryImporter.ReadSnapshots(CodexHistoryImporter.DefaultCodexHome,
+                    initial, DateTime.UtcNow, cancellation);
+            }, cancellation).ContinueWith(delegate(Task<List<UsageSnapshot>> task)
+            {
+                if (task.IsFaulted)
+                {
+                    task.Exception.Handle(delegate { return true; });
+                    return;
+                }
+                if (task.Status != TaskStatus.RanToCompletion) return;
+                TryPostToUi(delegate
+                {
+                    // Clearing history while the scan runs must not restore erased readings.
+                    if (shuttingDown || usageHistory.ImportCompleted) return;
+                    usageHistory.Import(task.Result);
+                    UpdateUsagePopup(currentSnapshot);
+                });
+            });
         }
 
         private void ApplyRefreshFailure(UsageSnapshot failure, bool showBalloon)
@@ -544,6 +649,7 @@ namespace CodexUsageTray
                 notifyIcon.ShowBalloonTip(3000, "Codex Usage", failureMessage, ToolTipIcon.Warning);
             }
             ScheduleAutomaticRedemptionCheck(lastSuccessfulSnapshot);
+            ScheduleResetExpiryReminder(lastSuccessfulSnapshot, true);
         }
 
         private static string BuildPausedFailureStatus(string failureMessage)
@@ -655,7 +761,7 @@ namespace CodexUsageTray
                 return;
             }
 
-            LimitWindow iconWindow = GetIconWindow(snapshot);
+            LimitWindow iconWindow = GetIconWindow(snapshot, settings.IconMetric);
             if (renderIcon)
             {
                 if (iconWindow == null)
@@ -736,9 +842,15 @@ namespace CodexUsageTray
             return tooltip.ToString();
         }
 
-        private static string BuildNativeTooltipWithStatus(UsageSnapshot snapshot)
+        private string BuildNativeTooltipWithStatus(UsageSnapshot snapshot)
         {
             string tooltip = BuildNativeTooltip(snapshot);
+            LimitWindow selected = GetIconWindow(snapshot, settings.IconMetric);
+            if (selected != null && string.Equals(settings.IconMetric, AppSettings.IconMetricAuto, StringComparison.OrdinalIgnoreCase))
+            {
+                tooltip = "Tray: " + (selected == snapshot.Weekly ? "Weekly" : "5-hour") + " (Auto)" +
+                    Environment.NewLine + tooltip;
+            }
             if (snapshot != null && !string.IsNullOrWhiteSpace(snapshot.StatusMessage))
             {
                 tooltip += Environment.NewLine + snapshot.StatusMessage;
@@ -791,6 +903,10 @@ namespace CodexUsageTray
 
         private void UpdateUsagePopup(UsageSnapshot snapshot)
         {
+            if (historyForm != null && !historyForm.IsDisposed)
+            {
+                historyForm.UpdateData(snapshot);
+            }
             UsagePopup popup = usagePopup;
             if (popup != null && !popup.IsDisposed && !popup.Disposing)
             {
@@ -857,15 +973,21 @@ namespace CodexUsageTray
             }
         }
 
-        private LimitWindow GetIconWindow(UsageSnapshot snapshot)
+        internal static LimitWindow GetIconWindow(UsageSnapshot snapshot, string iconMetric)
         {
             if (snapshot == null)
             {
                 return null;
             }
 
+            if (string.Equals(iconMetric, AppSettings.IconMetricAuto, StringComparison.OrdinalIgnoreCase))
+            {
+                if (snapshot.Weekly == null) return snapshot.FiveHour;
+                if (snapshot.FiveHour == null) return snapshot.Weekly;
+                return snapshot.FiveHour.UsedPercent > snapshot.Weekly.UsedPercent ? snapshot.FiveHour : snapshot.Weekly;
+            }
             bool preferFiveHour = string.Equals(
-                settings.IconMetric,
+                iconMetric,
                 AppSettings.IconMetricFiveHour,
                 StringComparison.OrdinalIgnoreCase);
             LimitWindow preferred = preferFiveHour ? snapshot.FiveHour : snapshot.Weekly;
@@ -960,6 +1082,47 @@ namespace CodexUsageTray
                 "Codex Limit Reset Banked",
                 added + " " + total,
                 ToolTipIcon.Info);
+        }
+
+        private void UpdateResetExpiryReminders(UsageSnapshot snapshot)
+        {
+            if (settings.ResetExpiryReminders)
+            {
+                List<RateLimitResetCredit> due = resetExpiryReminder.Observe(
+                    snapshot, DateTime.UtcNow, settings.ResetExpiryLeadHours);
+                if (due.Count > 0)
+                {
+                    DateTime expiration = due[0].ExpiresAtUtc.Value;
+                    foreach (RateLimitResetCredit credit in due)
+                    {
+                        if (credit.ExpiresAtUtc.Value < expiration) expiration = credit.ExpiresAtUtc.Value;
+                    }
+                    string message = due.Count == 1 ? "A banked reset expires " : due.Count + " banked resets expire soon. Earliest: ";
+                    message += TimeFormatter.FormatDateTime(expiration.ToLocalTime()) + ".";
+                    notifyIcon.ShowBalloonTip(5000, "Codex Reset Expiring", message, ToolTipIcon.Warning);
+                }
+            }
+            ScheduleResetExpiryReminder(snapshot);
+        }
+
+        private void ScheduleResetExpiryReminder(UsageSnapshot snapshot, bool retry = false)
+        {
+            resetReminderTimer.Stop();
+            if (shuttingDown || !settings.ResetExpiryReminders) return;
+            DateTime nowUtc = DateTime.UtcNow;
+            DateTime? next = resetExpiryReminder.GetNextCheckUtc(snapshot, nowUtc, settings.ResetExpiryLeadHours);
+            if (next.HasValue)
+            {
+                long delay = (long)(next.Value - nowUtc).TotalMilliseconds;
+                ArmResetReminderTimer(Math.Max(retry ? 300000L : 1000L, delay));
+            }
+        }
+
+        private void ArmResetReminderTimer(long milliseconds)
+        {
+            resetReminderTimer.Stop();
+            resetReminderTimer.Interval = (int)Math.Max(1000L, Math.Min(int.MaxValue, milliseconds));
+            resetReminderTimer.Start();
         }
 
         private void EvaluateAutomaticResetRedemption(UsageSnapshot snapshot)
@@ -1436,6 +1599,39 @@ namespace CodexUsageTray
             popup.ShowNear(Cursor.Position);
         }
 
+        private void ShowUsageHistory()
+        {
+            if (shuttingDown) return;
+            if (historyForm == null || historyForm.IsDisposed)
+            {
+                historyForm = new UsageHistoryForm(usageHistory, settings);
+                historyForm.HistoryCleared += delegate { UpdateUsagePopup(currentSnapshot); };
+            }
+            historyForm.UpdateData(currentSnapshot);
+            if (historyForm.WindowState == FormWindowState.Minimized) historyForm.WindowState = FormWindowState.Normal;
+            historyForm.Show();
+            historyForm.Activate();
+        }
+
+        private void ShowClaudeHistory()
+        {
+            if (shuttingDown || claudeSnapshot == null) return;
+            if (claudeHistoryForm == null || claudeHistoryForm.IsDisposed)
+            {
+                claudeHistoryForm = new UsageHistoryForm(claudeHistory, settings, "Claude");
+                claudeHistoryForm.HistoryCleared += delegate
+                {
+                    if (usagePopup != null && !usagePopup.IsDisposed)
+                        usagePopup.UpdateClaudeSnapshot(claudeSnapshot, claudeHistory);
+                };
+            }
+            claudeHistoryForm.UpdateData(claudeSnapshot);
+            if (claudeHistoryForm.WindowState == FormWindowState.Minimized)
+                claudeHistoryForm.WindowState = FormWindowState.Normal;
+            claudeHistoryForm.Show();
+            claudeHistoryForm.Activate();
+        }
+
         private void ShowSettings()
         {
             if (settingsForm != null && !settingsForm.IsDisposed)
@@ -1455,6 +1651,9 @@ namespace CodexUsageTray
                     popup.ApplySettings(settings);
                 }
                 ResetThresholdNotificationState();
+                if (historyForm != null && !historyForm.IsDisposed) historyForm.ApplySettings(settings);
+                if (claudeHistoryForm != null && !claudeHistoryForm.IsDisposed) claudeHistoryForm.ApplySettings(settings);
+                ScheduleResetExpiryReminder(lastSuccessfulSnapshot);
                 if (currentSnapshot != null && lastSuccessfulSnapshot != null)
                 {
                     RenderDataSnapshot(currentSnapshot, true, true, false);
@@ -1475,6 +1674,11 @@ namespace CodexUsageTray
                 else
                 {
                     autoRedemptionTimer.Stop();
+                }
+                if (settings.ResetExpiryReminders && !settings.AutoRedeemResetCredits &&
+                    !refreshInProgress && !autoRedemptionInProgress)
+                {
+                    RefreshUsage(false);
                 }
             };
             settingsForm.CheckUpdatesRequested += delegate { CheckForUpdates(true); };
@@ -1536,8 +1740,19 @@ namespace CodexUsageTray
 
         private UsagePopup CreateUsagePopup()
         {
-            UsagePopup popup = new UsagePopup(settings);
-            popup.RefreshRequested += delegate { RefreshUsage(false); };
+            UsagePopup popup = new UsagePopup(settings, usageHistory);
+            popup.UpdateClaudeSnapshot(claudeSnapshot, claudeHistory);
+            popup.HistoryRequested += delegate
+            {
+                popup.Hide();
+                if (popup.IsShowingClaude) ShowClaudeHistory();
+                else ShowUsageHistory();
+            };
+            popup.RefreshRequested += delegate
+            {
+                if (popup.IsShowingClaude) RefreshClaudeUsage();
+                else RefreshUsage(false);
+            };
             popup.SettingsRequested += delegate(object sender, EventArgs e)
             {
                 UsagePopup source = sender as UsagePopup;
@@ -1806,6 +2021,8 @@ namespace CodexUsageTray
             refreshTimer.Dispose();
             autoRedemptionTimer.Stop();
             autoRedemptionTimer.Dispose();
+            resetReminderTimer.Stop();
+            resetReminderTimer.Dispose();
             activityTimer.Stop();
             activityTimer.Dispose();
             if (startupUiTimer != null)
@@ -1823,6 +2040,16 @@ namespace CodexUsageTray
             {
                 settingsForm.Dispose();
                 settingsForm = null;
+            }
+            if (historyForm != null && !historyForm.IsDisposed)
+            {
+                historyForm.Dispose();
+                historyForm = null;
+            }
+            if (claudeHistoryForm != null && !claudeHistoryForm.IsDisposed)
+            {
+                claudeHistoryForm.Dispose();
+                claudeHistoryForm = null;
             }
             notifyIcon.Visible = false;
             notifyIcon.Dispose();

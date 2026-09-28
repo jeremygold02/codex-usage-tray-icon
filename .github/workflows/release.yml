@@ -235,16 +235,11 @@ jobs:
             "/out:$testExe" `
             /reference:System.dll `
             /reference:System.Core.dll `
+            /reference:System.Drawing.dll `
+            /reference:System.Windows.Forms.dll `
             /reference:System.Web.Extensions.dll `
-            tests\CodexUsageTray.Tests.cs `
-            src\CodexRateLimitClient.cs `
-            src\AutomaticResetRedemptionPolicy.cs `
-            src\RateLimitResetCredit.cs `
-            src\ResetCreditRedemptionResult.cs `
-            src\UsageSnapshot.cs `
-            src\UsageLimitSet.cs `
-            src\LimitWindow.cs `
-            src\UsageResetDetector.cs
+            tests\*.cs `
+            src\*.cs
           if ($LASTEXITCODE -ne 0) {
             throw "Test compilation failed with exit code $LASTEXITCODE."
           }

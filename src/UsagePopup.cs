@@ -9,19 +9,25 @@ namespace CodexUsageTray
     internal sealed class UsagePopup : Form
     {
         private const int WmDpiChanged = 0x02E0;
-        private const int LogicalWidth = 350;
+        private const int LogicalWidth = 380;
         private const int LogicalUsageTop = 43;
-        private const int LogicalUsageRowHeight = 48;
+        private const int LogicalUsageRowHeight = 68;
         private const int LogicalFooterTopGap = 5;
         private const int LogicalContentBottomPadding = 2;
         private const int LogicalFooterLineHeight = 18;
-        private const int LogicalDetailsButtonHeight = 22;
         private const int LogicalFooterBottomPadding = 5;
         private const string RefreshGlyph = "\uE72C";
 
         private readonly Button refreshButton;
         private readonly Button settingsButton;
-        private readonly Button detailsButton;
+        private readonly Button historyButton;
+        private readonly Button providerButton;
+        private readonly UsageHistoryStore codexHistory;
+        private UsageHistoryStore history;
+        private UsageHistoryStore claudeHistory;
+        private UsageSnapshot codexSnapshot;
+        private UsageSnapshot claudeSnapshot;
+        private bool showingClaude;
         private readonly ToolTip actionToolTip;
         private readonly Timer refreshAnimationTimer;
         private readonly Font titleFont;
@@ -36,15 +42,19 @@ namespace CodexUsageTray
         private int currentDpi = 96;
         private int refreshAnimationAngle = -90;
         private bool refreshing;
-        private bool detailsExpanded;
         private bool updatingLayout;
 
         public event EventHandler RefreshRequested;
         public event EventHandler SettingsRequested;
+        public event EventHandler HistoryRequested;
 
-        public UsagePopup(AppSettings settings)
+        public bool IsShowingClaude { get { return showingClaude; } }
+
+        public UsagePopup(AppSettings settings, UsageHistoryStore history)
         {
             this.settings = settings;
+            this.history = history;
+            codexHistory = history;
 
             titleFont = new Font("Segoe UI", 10.0f, FontStyle.Bold, GraphicsUnit.Point);
             rowLabelFont = new Font("Segoe UI", 9.0f, FontStyle.Regular, GraphicsUnit.Point);
@@ -70,15 +80,29 @@ namespace CodexUsageTray
 
             refreshButton = CreateActionButton("refreshButton", RefreshGlyph, "Refresh usage", 0);
             settingsButton = CreateActionButton("settingsButton", "\uE713", "Open settings", 1);
-            detailsButton = CreateDetailsButton();
+            historyButton = CreateActionButton("historyButton", "", "Open usage history", 2);
+            historyButton.Paint += HistoryButton_Paint;
+            providerButton = CreateActionButton("providerButton", "", "Switch usage provider", 3);
+            providerButton.Font = titleFont;
+            providerButton.Visible = false;
+            providerButton.Click += delegate
+            {
+                if (claudeSnapshot == null) return;
+                showingClaude = !showingClaude;
+                UpdateSelectedProvider();
+            };
             refreshButton.Click += RefreshButton_Click;
             refreshButton.Paint += RefreshButton_Paint;
             settingsButton.Click += SettingsButton_Click;
-            detailsButton.Click += DetailsButton_Click;
-            detailsButton.Paint += DetailsButton_Paint;
+            historyButton.Click += delegate
+            {
+                EventHandler handler = HistoryRequested;
+                if (handler != null) handler(this, EventArgs.Empty);
+            };
             Controls.Add(refreshButton);
             Controls.Add(settingsButton);
-            Controls.Add(detailsButton);
+            Controls.Add(historyButton);
+            Controls.Add(providerButton);
 
             actionToolTip = new ToolTip();
             actionToolTip.AutomaticDelay = 350;
@@ -86,7 +110,7 @@ namespace CodexUsageTray
             actionToolTip.ShowAlways = true;
             actionToolTip.SetToolTip(refreshButton, "Refresh usage");
             actionToolTip.SetToolTip(settingsButton, "Open settings");
-            actionToolTip.SetToolTip(detailsButton, "Show limit resets");
+            actionToolTip.SetToolTip(historyButton, "Open usage history");
 
             ApplyThemeColors();
             UpdateActionButtonState();
@@ -103,7 +127,29 @@ namespace CodexUsageTray
 
         public void UpdateSnapshot(UsageSnapshot value)
         {
-            snapshot = value;
+            codexSnapshot = value;
+            UpdateSelectedProvider();
+        }
+
+        public void UpdateClaudeSnapshot(UsageSnapshot value, UsageHistoryStore providerHistory)
+        {
+            claudeSnapshot = value != null && value.HasPrimaryLimit && providerHistory != null ? value : null;
+            claudeHistory = providerHistory;
+            if (claudeSnapshot == null) showingClaude = false;
+            UpdateSelectedProvider();
+        }
+
+        private void UpdateSelectedProvider()
+        {
+            snapshot = showingClaude ? claudeSnapshot : codexSnapshot;
+            history = showingClaude ? claudeHistory : codexHistory;
+            Text = showingClaude ? "Claude Usage" : "Codex Usage";
+            providerButton.Visible = claudeSnapshot != null;
+            providerButton.Text = (showingClaude ? "Claude" : "Codex") + " \u21c4";
+            providerButton.AccessibleName = "Showing " + (showingClaude ? "Claude" : "Codex") +
+                " usage; switch to " + (showingClaude ? "Codex" : "Claude");
+            actionToolTip.SetToolTip(providerButton, "Switch to " + (showingClaude ? "Codex" : "Claude") + " usage");
+            actionToolTip.SetToolTip(historyButton, "Open " + (showingClaude ? "Claude" : "Codex") + " usage history");
             UpdateActionButtonState();
             UpdateLayoutMetrics(true);
             Invalidate(true);
@@ -124,7 +170,6 @@ namespace CodexUsageTray
 
         public void ShowNear(Point cursor)
         {
-            detailsExpanded = false;
             UpdateLayoutMetrics(false);
 
             Rectangle area = Screen.FromPoint(cursor).WorkingArea;
@@ -309,7 +354,7 @@ namespace CodexUsageTray
                     mutedColor);
             }
 
-            if (!string.IsNullOrEmpty(BuildStatusLine()) || HasExpandableDetails())
+            if (!string.IsNullOrEmpty(BuildStatusLine()) || HasResetDetails())
             {
                 DrawFooter(graphics, textColor, mutedColor, borderColor, dark);
             }
@@ -335,30 +380,6 @@ namespace CodexUsageTray
             button.UseCompatibleTextRendering = false;
             button.TextAlign = ContentAlignment.MiddleCenter;
             button.Cursor = Cursors.Hand;
-            return button;
-        }
-
-        private Button CreateDetailsButton()
-        {
-            Button button = new Button();
-            button.Name = "detailsButton";
-            button.AutoEllipsis = true;
-            button.Font = detailFont;
-            button.AccessibleName = "Show limit resets";
-            button.AccessibleDescription = "Show available limit reset expirations";
-            button.AccessibleRole = AccessibleRole.PushButton;
-            button.TabIndex = 2;
-            button.TabStop = true;
-            button.AutoSize = false;
-            button.Margin = new Padding(0);
-            button.Padding = new Padding(4, 0, 24, 0);
-            button.FlatStyle = FlatStyle.Flat;
-            button.FlatAppearance.BorderSize = 0;
-            button.UseVisualStyleBackColor = false;
-            button.UseCompatibleTextRendering = false;
-            button.TextAlign = ContentAlignment.MiddleLeft;
-            button.Cursor = Cursors.Hand;
-            button.Visible = false;
             return button;
         }
 
@@ -420,43 +441,30 @@ namespace CodexUsageTray
             }
         }
 
-        private void DetailsButton_Click(object sender, EventArgs e)
+        private void HistoryButton_Paint(object sender, PaintEventArgs e)
         {
-            if (!HasExpandableDetails())
+            float scale = currentDpi / 96.0f;
+            float left = (historyButton.Width - 14 * scale) / 2;
+            float top = (historyButton.Height - 14 * scale) / 2;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Pen pen = new Pen(historyButton.ForeColor, Math.Max(1, scale)))
             {
-                return;
+                e.Graphics.DrawLines(pen, new PointF[] {
+                    new PointF(left, top), new PointF(left, top + 14 * scale),
+                    new PointF(left + 14 * scale, top + 14 * scale) });
+                e.Graphics.DrawLines(pen, new PointF[] {
+                    new PointF(left + 3 * scale, top + 10 * scale),
+                    new PointF(left + 6 * scale, top + 6 * scale),
+                    new PointF(left + 10 * scale, top + 8 * scale),
+                    new PointF(left + 14 * scale, top + 2 * scale) });
             }
-
-            detailsExpanded = !detailsExpanded;
-            UpdateLayoutMetrics(true);
-            Invalidate(true);
-        }
-
-        private void DetailsButton_Paint(object sender, PaintEventArgs e)
-        {
-            string glyph = detailsExpanded ? "\uE70E" : "\uE70D";
-            Rectangle glyphBounds = new Rectangle(
-                detailsButton.ClientSize.Width - ScaleMetric(24),
-                0,
-                ScaleMetric(20),
-                detailsButton.ClientSize.Height);
-            TextRenderer.DrawText(
-                e.Graphics,
-                glyph,
-                glyphFont,
-                glyphBounds,
-                detailsButton.ForeColor,
-                TextFormatFlags.SingleLine |
-                    TextFormatFlags.VerticalCenter |
-                    TextFormatFlags.HorizontalCenter |
-                    TextFormatFlags.NoPadding);
         }
 
         private void DrawHeader(Graphics graphics, Color textColor, Color mutedColor)
         {
             int left = ScaleMetric(14);
             int top = ScaleMetric(9);
-            int right = refreshButton.Left - ScaleMetric(8);
+            int right = historyButton.Left - ScaleMetric(8);
             int height = ScaleMetric(22);
             Rectangle titleBounds = new Rectangle(left, top, Math.Max(0, right - left), height);
             TextFormatFlags flags = TextFormatFlags.SingleLine |
@@ -464,7 +472,7 @@ namespace CodexUsageTray
                 TextFormatFlags.NoPrefix |
                 TextFormatFlags.NoPadding;
 
-            const string title = "Codex Usage";
+            string title = showingClaude ? "Claude Usage" : "Codex Usage";
             Size titleSize = TextRenderer.MeasureText(
                 graphics,
                 title,
@@ -476,7 +484,10 @@ namespace CodexUsageTray
                 titleBounds.Top,
                 Math.Min(titleBounds.Width, titleSize.Width),
                 titleBounds.Height);
-            TextRenderer.DrawText(graphics, title, titleFont, titleTextBounds, textColor, flags);
+            if (claudeSnapshot == null)
+                TextRenderer.DrawText(graphics, title, titleFont, titleTextBounds, textColor, flags);
+            else
+                titleTextBounds.Width = ScaleMetric(100);
 
             string headerDetail = null;
             if ((settings == null || settings.ShowPopupLastUpdated) &&
@@ -587,6 +598,13 @@ namespace CodexUsageTray
                 barBounds,
                 percentColor,
                 singleLine | TextFormatFlags.HorizontalCenter);
+
+            bool weekly = window == snapshot.Weekly;
+            DateTime nowUtc = DateTime.UtcNow;
+            string forecast = history.GetForecast(weekly, snapshot, nowUtc);
+            TextRenderer.DrawText(graphics, forecast, detailFont,
+                new Rectangle(x, y + ScaleMetric(42), width, ScaleMetric(18)), mutedColor,
+                singleLine | TextFormatFlags.EndEllipsis);
         }
 
         private void DrawUsageHeader(
@@ -775,20 +793,19 @@ namespace CodexUsageTray
                 y += ScaleMetric(LogicalFooterLineHeight);
             }
 
-            if (detailsButton.Visible && detailsExpanded)
+            if (HasResetDetails())
             {
-                y = detailsButton.Bottom + ScaleMetric(4);
-                DrawExpandedDetails(graphics, y, textColor, mutedColor);
+                DrawResetDetails(graphics, y, textColor, mutedColor);
             }
         }
 
-        private void DrawExpandedDetails(
+        private void DrawResetDetails(
             Graphics graphics,
             int y,
             Color textColor,
             Color mutedColor)
         {
-            if (ShouldShowResetAvailability() && HasResetInformation())
+            if (HasResetDetails())
             {
                 int knownCount = snapshot.AvailableResets != null
                     ? snapshot.AvailableResets.Count
@@ -871,21 +888,9 @@ namespace CodexUsageTray
                 ScaleMetric(17));
         }
 
-        private bool HasExpandableDetails()
+        private bool HasResetDetails()
         {
-            return ShouldShowResetAvailability() && GetResetDisplayCount() > 0;
-        }
-
-        private bool ShouldShowResetAvailability()
-        {
-            return settings == null || settings.ShowResetAvailability;
-        }
-
-        private bool HasResetInformation()
-        {
-            return snapshot != null &&
-                (snapshot.AvailableResetCount.HasValue ||
-                    (snapshot.AvailableResets != null && snapshot.AvailableResets.Count > 0));
+            return GetResetDisplayCount() > 0;
         }
 
         private int GetResetDisplayCount()
@@ -904,38 +909,10 @@ namespace CodexUsageTray
             return Math.Max(knownCount, Math.Max(0, reportedCount));
         }
 
-        private string BuildResetSummary()
-        {
-            int count = GetResetDisplayCount();
-            string summary = count.ToString(CultureInfo.CurrentCulture) +
-                (count == 1 ? " limit reset" : " limit resets");
-            DateTime? nextExpiration = null;
-            if (snapshot != null && snapshot.AvailableResets != null)
-            {
-                foreach (RateLimitResetCredit credit in snapshot.AvailableResets)
-                {
-                    if (credit != null && credit.ExpiresAtUtc.HasValue &&
-                        (!nextExpiration.HasValue ||
-                            credit.ExpiresAtUtc.Value < nextExpiration.Value))
-                    {
-                        nextExpiration = credit.ExpiresAtUtc.Value;
-                    }
-                }
-            }
-
-            if (nextExpiration.HasValue)
-            {
-                summary += " (next expires " + TimeFormatter.FormatDateTime(
-                    nextExpiration.Value.ToLocalTime()) + ")";
-            }
-
-            return summary;
-        }
-
-        private int GetExpandedDetailLineCount()
+        private int GetResetDetailLineCount()
         {
             int lineCount = 0;
-            if (ShouldShowResetAvailability() && HasResetInformation())
+            if (HasResetDetails())
             {
                 int knownCount = snapshot.AvailableResets != null
                     ? snapshot.AvailableResets.Count
@@ -1016,11 +993,7 @@ namespace CodexUsageTray
             {
                 int oldBottom = Bottom;
                 bool hasStatus = !string.IsNullOrEmpty(BuildStatusLine());
-                bool hasDetails = HasExpandableDetails();
-                if (!hasDetails)
-                {
-                    detailsExpanded = false;
-                }
+                bool hasDetails = HasResetDetails();
 
                 int footerContentTop = GetLogicalFooterContentTop();
                 int logicalHeight = footerContentTop + LogicalContentBottomPadding;
@@ -1033,12 +1006,7 @@ namespace CodexUsageTray
                     }
                     if (hasDetails)
                     {
-                        logicalHeight += LogicalDetailsButtonHeight;
-                        if (detailsExpanded)
-                        {
-                            logicalHeight += 4 +
-                                (GetExpandedDetailLineCount() * LogicalFooterLineHeight);
-                        }
+                        logicalHeight += GetResetDetailLineCount() * LogicalFooterLineHeight;
                     }
                     logicalHeight += LogicalFooterBottomPadding;
                 }
@@ -1049,7 +1017,6 @@ namespace CodexUsageTray
                 }
 
                 LayoutActionButtons();
-                LayoutFooterControls(hasStatus, hasDetails);
                 UpdateRegion();
 
                 if (preserveBottom && Visible)
@@ -1072,28 +1039,8 @@ namespace CodexUsageTray
             int gap = ScaleMetric(2);
             settingsButton.Bounds = new Rectangle(ClientSize.Width - right - size, top, size, size);
             refreshButton.Bounds = new Rectangle(settingsButton.Left - gap - size, top, size, size);
-        }
-
-        private void LayoutFooterControls(bool hasStatus, bool hasDetails)
-        {
-            detailsButton.Visible = hasDetails;
-            if (!hasDetails)
-            {
-                return;
-            }
-
-            int y = GetLogicalFooterContentTop() + (hasStatus ? LogicalFooterLineHeight : 0);
-            detailsButton.Bounds = new Rectangle(
-                ScaleMetric(10),
-                ScaleMetric(y),
-                ClientSize.Width - ScaleMetric(20),
-                ScaleMetric(LogicalDetailsButtonHeight));
-            detailsButton.Text = BuildResetSummary();
-            detailsButton.AccessibleName = (detailsExpanded ? "Hide " : "Show ") +
-                detailsButton.Text;
-            detailsButton.AccessibleDescription = detailsButton.AccessibleName;
-            actionToolTip.SetToolTip(detailsButton, detailsButton.AccessibleName);
-            detailsButton.Invalidate();
+            historyButton.Bounds = new Rectangle(refreshButton.Left - gap - size, top, size, size);
+            providerButton.Bounds = new Rectangle(ScaleMetric(10), top, ScaleMetric(104), size);
         }
 
         private int GetLogicalFooterContentTop()
@@ -1170,15 +1117,16 @@ namespace CodexUsageTray
 
             refreshButton.Enabled = !active;
             refreshButton.Cursor = active ? Cursors.Default : Cursors.Hand;
-            refreshButton.AccessibleName = active ? "Refreshing usage" : "Refresh usage";
+            refreshButton.AccessibleName = active ? "Refreshing usage" :
+                showingClaude ? "Reload the latest Claude CLI reading" : "Refresh usage";
             refreshButton.AccessibleDescription = refreshButton.AccessibleName;
-            actionToolTip.SetToolTip(refreshButton, active ? "Refreshing usage" : "Refresh usage");
+            actionToolTip.SetToolTip(refreshButton, refreshButton.AccessibleName);
             refreshButton.Invalidate();
         }
 
         private bool IsRefreshActive()
         {
-            return refreshing || (snapshot != null && snapshot.IsRefreshing);
+            return (!showingClaude && refreshing) || (snapshot != null && snapshot.IsRefreshing);
         }
 
         private void ApplyThemeColors()
@@ -1197,7 +1145,8 @@ namespace CodexUsageTray
             ForeColor = textColor;
             ApplyButtonColors(refreshButton, backColor, textColor, hoverColor, pressedColor);
             ApplyButtonColors(settingsButton, backColor, textColor, hoverColor, pressedColor);
-            ApplyButtonColors(detailsButton, backColor, textColor, hoverColor, pressedColor);
+            ApplyButtonColors(historyButton, backColor, textColor, hoverColor, pressedColor);
+            ApplyButtonColors(providerButton, backColor, textColor, hoverColor, pressedColor);
         }
 
         private static void ApplyButtonColors(

@@ -26,6 +26,10 @@ namespace CodexUsageTray.Tests
             TestBankedResetDetection();
             TestUsageResetNotificationSuppression();
             TestAutomaticResetRedemptionPolicy();
+            UsageHistoryTests.Run();
+            UsageFeaturesTests.Run();
+            ClaudeUsageTests.Run();
+            CodexHistoryImporterTests.Run();
 
             if (failures != 0)
             {

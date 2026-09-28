@@ -42,6 +42,11 @@ namespace CodexUsageTray
         private static void Main()
         {
             string[] args = Environment.GetCommandLineArgs();
+            if (HasArgument(args, "--claude-statusline"))
+            {
+                ClaudeUsageSource.HandleStatusLine();
+                return;
+            }
             bool exitRequested = HasArgument(args, "--exit");
             bool createdNew;
             using (EventWaitHandle exitSignal = new EventWaitHandle(

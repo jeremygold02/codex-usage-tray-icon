@@ -9,11 +9,12 @@ namespace CodexUsageTray
 {
     internal sealed class AppSettings
     {
-        public const int CurrentSettingsVersion = 7;
+        public const int CurrentSettingsVersion = 8;
         public const string DefaultTrayBoxColor = "#0078D7";
         public const string DefaultTrayTextColor = "#FFFFFF";
         public const string IconMetricWeekly = "Weekly";
         public const string IconMetricFiveHour = "FiveHour";
+        public const string IconMetricAuto = "Auto";
         public const string ThemeSystem = "System Default";
         public const string ThemeDark = "Dark Mode";
         public const string ThemeLight = "Light Mode";
@@ -39,7 +40,8 @@ namespace CodexUsageTray
         public bool ShowPopupResetTimes { get; set; }
         public bool ShowPopupLastUpdated { get; set; }
         public bool ShowAdditionalLimits { get; set; }
-        public bool ShowResetAvailability { get; set; }
+        public bool ResetExpiryReminders { get; set; }
+        public int ResetExpiryLeadHours { get; set; }
         public bool StartWithWindows { get; set; }
         public bool ThresholdNotifications { get; set; }
         public bool AutoRedeemResetCredits { get; set; }
@@ -80,7 +82,8 @@ namespace CodexUsageTray
             ShowPopupResetTimes = true;
             ShowPopupLastUpdated = true;
             ShowAdditionalLimits = true;
-            ShowResetAvailability = true;
+            ResetExpiryReminders = true;
+            ResetExpiryLeadHours = 24;
             StartWithWindows = false;
             ThresholdNotifications = false;
             AutoRedeemResetCredits = false;
@@ -115,7 +118,8 @@ namespace CodexUsageTray
             ShowPopupResetTimes = source.ShowPopupResetTimes;
             ShowPopupLastUpdated = source.ShowPopupLastUpdated;
             ShowAdditionalLimits = source.ShowAdditionalLimits;
-            ShowResetAvailability = source.ShowResetAvailability;
+            ResetExpiryReminders = source.ResetExpiryReminders;
+            ResetExpiryLeadHours = source.ResetExpiryLeadHours;
             StartWithWindows = source.StartWithWindows;
             ThresholdNotifications = source.ThresholdNotifications;
             AutoRedeemResetCredits = source.AutoRedeemResetCredits;
@@ -380,7 +384,6 @@ namespace CodexUsageTray
             if (sourceVersion < 6)
             {
                 ShowAdditionalLimits = true;
-                ShowResetAvailability = true;
             }
             if (sourceVersion < 7)
             {
@@ -390,6 +393,15 @@ namespace CodexUsageTray
                 AutoRedeemIdempotencyKey = null;
                 AutoRedeemAttemptStatus = null;
                 AutoRedeemLastAttemptUtc = null;
+            }
+            if (sourceVersion < 8)
+            {
+                ResetExpiryReminders = true;
+                ResetExpiryLeadHours = 24;
+            }
+            if (ResetExpiryLeadHours < 1 || ResetExpiryLeadHours > 72)
+            {
+                ResetExpiryLeadHours = 24;
             }
             if (CriticalThreshold < 1 || CriticalThreshold > 99)
             {

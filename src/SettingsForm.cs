@@ -18,10 +18,12 @@ namespace CodexUsageTray
         private NumericUpDown previewPercentNumeric;
         private RadioButton weeklyRadio;
         private RadioButton fiveHourRadio;
+        private RadioButton autoMetricRadio;
+        private CheckBox resetExpiryRemindersCheckBox;
+        private NumericUpDown resetExpiryLeadNumeric;
         private ComboBox themeCombo;
         private CheckBox showResetTimesCheckBox;
         private CheckBox showLastUpdatedCheckBox;
-        private CheckBox showResetAvailabilityCheckBox;
         private CheckBox startWithWindowsCheckBox;
         private CheckBox thresholdNotificationsCheckBox;
         private CheckBox autoRedeemResetCreditsCheckBox;
@@ -60,8 +62,8 @@ namespace CodexUsageTray
             toolTip.ShowAlways = true;
 
             Text = "Codex Usage Tray Settings";
-            ClientSize = new Size(440, 605);
-            MinimumSize = new Size(456, 644);
+            ClientSize = new Size(440, 635);
+            MinimumSize = new Size(456, 674);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -192,8 +194,11 @@ namespace CodexUsageTray
             FlowLayoutPanel metricOptions = CreateFlowLayout();
             weeklyRadio = CreateRadio("&Weekly", "Weekly usage remaining");
             fiveHourRadio = CreateRadio("&5-hour", "Five-hour usage remaining");
+            autoMetricRadio = CreateRadio("&Auto", "Show the lowest remaining usage");
             metricOptions.Controls.Add(weeklyRadio);
             metricOptions.Controls.Add(fiveHourRadio);
+            metricOptions.Controls.Add(autoMetricRadio);
+            toolTip.SetToolTip(autoMetricRadio, "Show whichever limit has the lower remaining percentage. The tray tooltip identifies the selected limit.");
             toolTip.SetToolTip(weeklyRadio, "Show weekly usage remaining in the tray icon.");
             toolTip.SetToolTip(
                 fiveHourRadio,
@@ -257,6 +262,15 @@ namespace CodexUsageTray
             toolTip.SetToolTip(lowNumeric, "Low must be greater than or equal to Critical. The paired value adjusts immediately.");
             thresholdControls = thresholdRow;
             layout.Controls.Add(thresholdRow, 0, 2);
+
+            FlowLayoutPanel reminderRow = CreateFlowLayout();
+            resetExpiryRemindersCheckBox = CreateCheckBox("Reset expiry &reminders", "Reset expiry reminders");
+            reminderRow.Controls.Add(resetExpiryRemindersCheckBox);
+            resetExpiryLeadNumeric = CreateNumeric(1, 72, 44, "Hours before reset credit expiration");
+            reminderRow.Controls.Add(resetExpiryLeadNumeric);
+            reminderRow.Controls.Add(CreateSuffixLabel("hours before expiry"));
+            toolTip.SetToolTip(resetExpiryRemindersCheckBox, "Notify once per reset credit before it expires, including when Auto-use resets is off. Known expirations trigger a fresh check even while idle.");
+            layout.Controls.Add(reminderRow, 0, 3);
 
             group.Controls.Add(layout);
             return group;
@@ -424,19 +438,11 @@ namespace CodexUsageTray
                 "Show reset times");
             layout.Controls.Add(showResetTimesCheckBox, 1, 0);
 
-            showResetAvailabilityCheckBox = CreateCheckBox(
-                "Show &limit resets",
-                "Show available limit resets");
-            toolTip.SetToolTip(
-                showResetAvailabilityCheckBox,
-                "Show available limit reset credits and expiration dates in the expanded popup.");
-            layout.Controls.Add(showResetAvailabilityCheckBox, 0, 1);
-
             colorBarsCheckBox = CreateCheckBox(
                 "Color &usage bars",
                 "Color usage bars by remaining usage");
             toolTip.SetToolTip(colorBarsCheckBox, "Color popup bars by normal, low, and critical usage levels.");
-            layout.Controls.Add(colorBarsCheckBox, 1, 1);
+            layout.Controls.Add(colorBarsCheckBox, 0, 1);
 
             group.Controls.Add(layout);
             return group;
@@ -497,18 +503,17 @@ namespace CodexUsageTray
             SetNumericValue(autoRedeemLeadNumeric, settings.AutoRedeemLeadMinutes);
             EnsureValidValues();
 
-            weeklyRadio.Checked = !string.Equals(
-                settings.IconMetric,
-                AppSettings.IconMetricFiveHour,
-                StringComparison.OrdinalIgnoreCase);
             fiveHourRadio.Checked = string.Equals(
                 settings.IconMetric,
                 AppSettings.IconMetricFiveHour,
                 StringComparison.OrdinalIgnoreCase);
+            autoMetricRadio.Checked = string.Equals(settings.IconMetric, AppSettings.IconMetricAuto, StringComparison.OrdinalIgnoreCase);
+            weeklyRadio.Checked = !fiveHourRadio.Checked && !autoMetricRadio.Checked;
+            resetExpiryRemindersCheckBox.Checked = settings.ResetExpiryReminders;
+            SetNumericValue(resetExpiryLeadNumeric, settings.ResetExpiryLeadHours);
             colorBarsCheckBox.Checked = settings.ColorBars;
             showResetTimesCheckBox.Checked = settings.ShowPopupResetTimes;
             showLastUpdatedCheckBox.Checked = settings.ShowPopupLastUpdated;
-            showResetAvailabilityCheckBox.Checked = settings.ShowResetAvailability;
             startWithWindowsCheckBox.Checked = StartupManager.IsEnabled();
             thresholdNotificationsCheckBox.Checked = settings.ThresholdNotifications;
             autoRedeemResetCreditsCheckBox.Checked = settings.AutoRedeemResetCredits;
@@ -591,6 +596,7 @@ namespace CodexUsageTray
             };
             thresholdNotificationsCheckBox.CheckedChanged += delegate { UpdateDependentControlStates(); };
             autoRedeemResetCreditsCheckBox.CheckedChanged += delegate { UpdateDependentControlStates(); };
+            resetExpiryRemindersCheckBox.CheckedChanged += delegate { UpdateDependentControlStates(); };
             showTrayBoxCheckBox.CheckedChanged += delegate
             {
                 UpdateDependentControlStates();
@@ -616,13 +622,14 @@ namespace CodexUsageTray
             AppSettings candidate = settings.Clone();
             candidate.CriticalThreshold = (int)criticalNumeric.Value;
             candidate.LowThreshold = (int)lowNumeric.Value;
-            candidate.IconMetric = fiveHourRadio.Checked
+            candidate.IconMetric = autoMetricRadio.Checked ? AppSettings.IconMetricAuto : fiveHourRadio.Checked
                 ? AppSettings.IconMetricFiveHour
                 : AppSettings.IconMetricWeekly;
             candidate.ColorBars = colorBarsCheckBox.Checked;
             candidate.ShowPopupResetTimes = showResetTimesCheckBox.Checked;
             candidate.ShowPopupLastUpdated = showLastUpdatedCheckBox.Checked;
-            candidate.ShowResetAvailability = showResetAvailabilityCheckBox.Checked;
+            candidate.ResetExpiryReminders = resetExpiryRemindersCheckBox.Checked;
+            candidate.ResetExpiryLeadHours = (int)resetExpiryLeadNumeric.Value;
             candidate.StartWithWindows = startWithWindowsCheckBox.Checked;
             candidate.ThresholdNotifications = thresholdNotificationsCheckBox.Checked;
             candidate.AutoRedeemResetCredits = autoRedeemResetCreditsCheckBox.Checked;
@@ -670,10 +677,12 @@ namespace CodexUsageTray
             idleRefreshNumeric.Value = defaults.IdleRefreshSeconds;
             weeklyRadio.Checked = true;
             fiveHourRadio.Checked = false;
+            autoMetricRadio.Checked = false;
+            resetExpiryRemindersCheckBox.Checked = defaults.ResetExpiryReminders;
+            resetExpiryLeadNumeric.Value = defaults.ResetExpiryLeadHours;
             colorBarsCheckBox.Checked = defaults.ColorBars;
             showResetTimesCheckBox.Checked = defaults.ShowPopupResetTimes;
             showLastUpdatedCheckBox.Checked = defaults.ShowPopupLastUpdated;
-            showResetAvailabilityCheckBox.Checked = defaults.ShowResetAvailability;
             startWithWindowsCheckBox.Checked = defaults.StartWithWindows;
             thresholdNotificationsCheckBox.Checked = defaults.ThresholdNotifications;
             autoRedeemResetCreditsCheckBox.Checked = defaults.AutoRedeemResetCredits;
@@ -692,6 +701,7 @@ namespace CodexUsageTray
 
         private void UpdateDependentControlStates()
         {
+            resetExpiryLeadNumeric.Enabled = resetExpiryRemindersCheckBox.Checked;
             if (thresholdControls != null)
             {
                 thresholdControls.Enabled = thresholdNotificationsCheckBox.Checked;
