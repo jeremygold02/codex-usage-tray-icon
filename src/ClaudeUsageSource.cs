@@ -15,7 +15,7 @@ namespace CodexUsageTray
         private const int MaxCacheBytes = 4096;
         private const int MaxAuthOutputCharacters = 32768;
         private const int AuthTimeoutMilliseconds = 3000;
-        private const int CacheLifetimeMinutes = 30;
+        private const int FreshnessMinutes = 30;
         private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         internal static string DefaultPath
@@ -70,6 +70,9 @@ namespace CodexUsageTray
             }
 
             Dictionary<string, object> limits = GetObject(root, "rate_limits");
+            // Startup status lines have no quota data until the first API response.
+            // Keep the last actual reading and its original capture time.
+            if (limits == null) return false;
             LimitWindowData fiveHour = ReadWindow(limits, "five_hour", nowUtc);
             LimitWindowData weekly = ReadWindow(limits, "seven_day", nowUtc);
             Dictionary<string, object> cache = new Dictionary<string, object>();
@@ -138,7 +141,7 @@ namespace CodexUsageTray
                 }
                 DateTime capturedAt = new DateTime(capturedTicks, DateTimeKind.Utc);
                 TimeSpan age = nowUtc - capturedAt;
-                if (age < TimeSpan.Zero || age > TimeSpan.FromMinutes(CacheLifetimeMinutes))
+                if (age < TimeSpan.Zero)
                 {
                     return null;
                 }
@@ -152,6 +155,7 @@ namespace CodexUsageTray
                 UsageSnapshot snapshot = new UsageSnapshot();
                 snapshot.LastUpdated = capturedAt.ToLocalTime();
                 snapshot.LastAttempted = nowUtc.ToLocalTime();
+                snapshot.IsStale = age > TimeSpan.FromMinutes(FreshnessMinutes);
                 snapshot.FiveHour = ToLimitWindow(fiveHour, 300, capturedAt);
                 snapshot.Weekly = ToLimitWindow(weekly, 10080, capturedAt);
                 return snapshot;

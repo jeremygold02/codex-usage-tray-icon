@@ -24,7 +24,7 @@ Each refresh starts a short-lived local `codex app-server --stdio` process and r
 
 ## Optional Claude support
 
-Claude appears only when the native Windows Claude CLI is signed in and the tray app has a valid quota reading from the last 30 minutes. Otherwise, the popup and tray menu show no Claude controls or error placeholders. The tray icon and notifications continue to represent Codex.
+Claude appears when the native Windows Claude CLI is signed in and the tray app has a saved quota reading whose reset has not passed. Readings older than 30 minutes stay visible with a stale-data notice, including after a tray restart; forecasts are suppressed until fresh data arrives. Otherwise, the popup and tray menu show no Claude controls or error placeholders. The tray icon and notifications continue to represent Codex.
 
 To connect Claude, use Claude Code **v2.1.251 or later**, sign in with your Claude subscription, and configure its [status-line command](https://code.claude.com/docs/en/statusline) to send readings to this executable. For example, merge this property into `%USERPROFILE%\.claude\settings.json`, replacing the executable path with your actual location:
 
@@ -42,7 +42,7 @@ This command captures usage silently. If you already have a status-line command,
 - Start a normal CLI session and use it. Claude supplies `rate_limits` after an API response for supported subscription accounts; signing in alone is insufficient. The collector never sends a prompt to obtain readings.
 - When data becomes available, click the provider name in the popup header to switch between **Codex** and **Claude**. The chart button opens the selected provider's history. A **Claude usage history** tray-menu item also appears.
 - Claude uses the same pace estimates and charts, with separate history in `claude-usage-history.json`. Clear that history after switching Claude accounts. Only quota percentages, reset times, and observation timestamps are saved in `claude-usage.json` and history.
-- The app checks the local feed and CLI authentication every 30 seconds when a fresh feed exists, independently of Codex activity. Claude's refresh button reloads the latest feed; it does not query the account for a new reading. Expired windows are hidden independently. Missing, invalid, stale, or unauthenticated data hides Claude completely.
+- The app checks the local feed and CLI authentication every 30 seconds when an unexpired quota window exists, independently of Codex activity. Claude's refresh button reloads the latest feed; it does not query the account for a new reading. Restarting the CLI before its first API response does not erase the saved reading. Expired windows are hidden independently; when all saved windows have expired, a new CLI reading is needed. Missing, invalid, or unauthenticated data hides Claude completely.
 - Native `claude.exe` is discovered in `%USERPROFILE%\.local\bin` or on `PATH`. Restart the tray app after installing the CLI or changing `PATH`.
 
 Claude Desktop and CLI share account allowances, but **Desktop sign-in alone does not enable this integration**. Desktop's Code tab is not guaranteed to run CLI status-line commands. This integration requires the CLI feed; it does not scrape Desktop or poll an undocumented account endpoint.

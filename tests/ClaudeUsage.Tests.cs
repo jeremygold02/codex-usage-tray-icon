@@ -45,8 +45,22 @@ namespace CodexUsageTray.Tests
             Assert(snapshot.FiveHour.ResetAfterSeconds == 7200 &&
                 snapshot.LastUpdated.AddSeconds(snapshot.FiveHour.ResetAfterSeconds.Value).ToUniversalTime() == now.AddHours(2),
                 "reset deadline remains anchored to capture time");
-            Assert(ClaudeUsageSource.ReadSnapshot(path, now.AddMinutes(30).AddTicks(1)) == null,
-                "cache expires after 30 minutes");
+            Assert(!snapshot.IsStale, "freshness boundary is still current");
+            snapshot = ClaudeUsageSource.ReadSnapshot(path, now.AddMinutes(30).AddTicks(1));
+            Assert(snapshot != null && snapshot.IsStale && snapshot.Weekly.UsedPercent == 41.2 &&
+                snapshot.LastUpdated.ToUniversalTime() == now,
+                "old readings survive restart as stale without changing the observation time");
+            Assert(!ClaudeUsageSource.CaptureStatusLine("{}", path, now.AddMinutes(40)) &&
+                File.ReadAllText(path) == stored,
+                "CLI startup without quota data preserves the last actual reading");
+            snapshot = ClaudeUsageSource.ReadSnapshot(path, now.AddDays(1));
+            Assert(snapshot != null && snapshot.IsStale && snapshot.FiveHour == null && snapshot.Weekly != null,
+                "stale weekly quota survives expiry of the shorter window");
+            Assert(ClaudeUsageSource.ReadSnapshot(path, now.AddDays(3)) == null,
+                "expired quota windows are never shown as current allowance");
+            Assert(ClaudeUsageSource.CaptureStatusLine(input, path, now.AddMinutes(45)), "new quota reading is captured");
+            Assert(!ClaudeUsageSource.ReadSnapshot(path, now.AddMinutes(45)).IsStale,
+                "new readings restore fresh status");
             Assert(ClaudeUsageSource.ReadSnapshot(path, now.AddTicks(-1)) == null,
                 "future capture time is rejected");
         }

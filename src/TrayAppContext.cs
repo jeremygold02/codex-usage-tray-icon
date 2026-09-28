@@ -409,7 +409,7 @@ namespace CodexUsageTray
                 {
                     UsageSnapshot candidate = ClaudeUsageSource.ReadSnapshot(ClaudeUsageSource.DefaultPath, DateTime.UtcNow);
                     if (candidate == null || !ClaudeUsageSource.IsAuthenticated()) return null;
-                    // Recheck freshness after authentication, which can time out.
+                    // Recheck window expiry after authentication, which can time out.
                     return ClaudeUsageSource.ReadSnapshot(ClaudeUsageSource.DefaultPath, DateTime.UtcNow);
                 }
                 catch { return null; }
