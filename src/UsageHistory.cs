@@ -262,8 +262,24 @@ namespace CodexUsageTray
 
             double hours = (last.TimestampUtc - periodSamples[start].TimestampUtc).TotalHours;
             if (end - start < 2 || hours < (weekly ? 6 : 0.25)) return false;
-            ratePerHour = Math.Max(0,
-                (lastWindow.UsedPercent - GetWindow(periodSamples[start], weekly).UsedPercent) / hours);
+            // Weight elapsed time, not sample count: frequent polling must not amplify
+            // a burst. Integrating the decay over each interval also keeps a steady
+            // rate unchanged when the same interval is split into more observations.
+            double decayPerHour = Math.Log(2) / (weekly ? 6 : 0.25);
+            double weightedRate = 0;
+            double totalWeight = 0;
+            for (int i = start + 1; i <= end; i++)
+            {
+                UsageHistorySample before = periodSamples[i - 1];
+                UsageHistorySample after = periodSamples[i];
+                double intervalHours = (after.TimestampUtc - before.TimestampUtc).TotalHours;
+                double weight = Math.Exp(-decayPerHour * (last.TimestampUtc - after.TimestampUtc).TotalHours) -
+                    Math.Exp(-decayPerHour * (last.TimestampUtc - before.TimestampUtc).TotalHours);
+                double increase = Math.Max(0, GetWindow(after, weekly).UsedPercent - GetWindow(before, weekly).UsedPercent);
+                weightedRate += increase / intervalHours * weight;
+                totalWeight += weight;
+            }
+            ratePerHour = weightedRate / totalWeight;
             return true;
         }
 

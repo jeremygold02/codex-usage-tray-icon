@@ -17,6 +17,7 @@ namespace CodexUsageTray.Tests
                 TestProjections(Path.Combine(directory, "projection.json"));
                 TestGapsAndResets(Path.Combine(directory, "cycles.json"));
                 TestWeeklyDepletion(Path.Combine(directory, "weekly.json"));
+                TestRecentPace(Path.Combine(directory, "recent.json"));
                 TestCorruptHistory(Path.Combine(directory, "corrupt.json"));
                 TestHistoryImport(Path.Combine(directory, "import.json"));
                 TestCycleAverage(Path.Combine(directory, "initial.json"));
@@ -255,6 +256,59 @@ namespace CodexUsageTray.Tests
             Assert(store.GetForecast(true, latest, now) == "Will last until reset", "weekly estimate is capped by its actual reset deadline");
             latest.Weekly.ResetAfterSeconds = 0;
             Assert(store.GetForecast(true, latest, now) == "Awaiting reset update", "expired reset needs a fresh reading");
+        }
+
+        private static void TestRecentPace(string path)
+        {
+            DateTime now = DateTime.UtcNow.AddSeconds(-1);
+            DateTime reset = now.AddDays(3);
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            store.Observe(Snapshot(now.AddHours(-12), 0, reset));
+            store.Observe(Snapshot(now.AddHours(-6), 6, reset));
+            UsageSnapshot latest = Snapshot(now, 30, reset);
+            store.Observe(latest);
+            UsageProjection projection = store.GetProjection(true, latest, now);
+            Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - 70.0 / 3) < 0.001,
+                "weekly acceleration favors recent consumption over the old 28-hour estimate");
+            Assert(store.GetForecast(true, latest, now) == "\u224823.5 hours left at current pace",
+                "forecast text uses the same recent weighted rate as the projection");
+
+            store.Clear();
+            store.Observe(Snapshot(now.AddHours(-12), 0, reset));
+            store.Observe(Snapshot(now.AddHours(-6), 24, reset));
+            store.Observe(latest);
+            projection = store.GetProjection(true, latest, now);
+            Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - 35) < 0.001,
+                "weekly slowdown extends the estimate instead of always biasing toward exhaustion");
+
+            store.Clear();
+            store.Observe(Snapshot(now.AddHours(-12), 0, reset));
+            store.Observe(Snapshot(now.AddHours(-6), 6, reset));
+            store.Observe(Snapshot(now.AddHours(-5), 10, reset));
+            store.Observe(Snapshot(now.AddHours(-1), 26, reset));
+            store.Observe(latest);
+            projection = store.GetProjection(true, latest, now);
+            Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - 70.0 / 3) < 0.001,
+                "additional irregular readings along the same trend do not change the estimate");
+
+            store.Clear();
+            reset = now.AddHours(4);
+            store.Observe(Snapshot(now.AddHours(-1), 0, reset));
+            store.Observe(Snapshot(now.AddMinutes(-30), 6, reset));
+            latest = Snapshot(now, 30, reset);
+            store.Observe(latest);
+            projection = store.GetProjection(false, latest, now);
+            Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - 70.0 / 40.8) < 0.001,
+                "five-hour acceleration responds to the last half-hour of usage");
+
+            store.Clear();
+            store.Observe(Snapshot(now.AddHours(-1), 0, reset));
+            store.Observe(Snapshot(now.AddMinutes(-30), 30, reset));
+            store.Observe(latest);
+            projection = store.GetProjection(false, latest, now);
+            Assert(projection != null && projection.EndsAtReset &&
+                Math.Abs(projection.EndRemainingPercent - 22) < 0.001,
+                "recent idle time slows consumption instead of being discarded");
         }
 
         private static void TestCorruptHistory(string path)
