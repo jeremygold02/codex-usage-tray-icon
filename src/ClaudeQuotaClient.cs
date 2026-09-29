@@ -29,7 +29,7 @@ namespace CodexUsageTray
         private readonly Func<string, string, string, ClaudeQuotaResponse> send;
         private readonly Func<DateTime> clock;
         private DateTime nextPoll;
-        private DateTime manualAllowed;
+        private DateTime rateLimitUntil;
         private string failure;
         private Dictionary<string, object> pendingOriginal;
         private Dictionary<string, object> pendingRotation;
@@ -85,16 +85,16 @@ namespace CodexUsageTray
             }
             catch { return null; }
 
-            if (now < nextPoll && (!force || now < manualAllowed))
+            if (now < rateLimitUntil || (!force && now < nextPoll))
             {
                 UsageSnapshot saved = Cached(now);
                 if (force && saved != null)
-                    saved.StatusMessage = "Refresh available at " +
-                        manualAllowed.ToLocalTime().ToString("T", CultureInfo.CurrentCulture);
+                    saved.StatusMessage = "Claude rate limited - retry at " +
+                        rateLimitUntil.ToLocalTime().ToString("T", CultureInfo.CurrentCulture);
                 return saved;
             }
             nextPoll = now.AddMinutes(5);
-            manualAllowed = now.AddSeconds(30);
+            rateLimitUntil = DateTime.MinValue;
             try
             {
                 if (requestStarted != null) requestStarted();
@@ -140,7 +140,7 @@ namespace CodexUsageTray
             int seconds = response != null && response.Status == 429
                 ? Math.Max(300, response.RetryAfterSeconds) : 60;
             nextPoll = now.AddSeconds(seconds);
-            manualAllowed = nextPoll;
+            rateLimitUntil = response != null && response.Status == 429 ? nextPoll : DateTime.MinValue;
             failure = response != null && (response.Status == 401 || response.Status == 403 || response.Status == 400)
                 ? "Claude sign-in needs renewal - showing saved usage"
                 : response != null && response.Status == 429

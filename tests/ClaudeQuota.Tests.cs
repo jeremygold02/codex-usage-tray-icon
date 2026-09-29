@@ -31,14 +31,9 @@ namespace CodexUsageTray.Tests
                 Action start = delegate { started++; };
                 Assert(test.Client.Read(false, start) != null && test.Requests.Count == 1 && started == 1,
                     "first read fetches usage and announces the request");
-                test.Now = test.Now.AddSeconds(29);
-                UsageSnapshot waiting = test.Client.Read(true, start);
-                Assert(test.Requests.Count == 1 && started == 1 && waiting.StatusMessage.StartsWith("Refresh available at "),
-                    "cooldown explains when refresh is available without announcing a network request");
-                test.Now = test.Now.AddSeconds(1);
                 UsageSnapshot refreshed = test.Client.Read(true, start);
                 Assert(test.Requests.Count == 2 && started == 2 && refreshed.StatusMessage == "Claude usage updated",
-                    "manual refresh announces the request and confirms successful completion");
+                    "manual refresh can run immediately after completion and confirms success");
                 test.Now = test.Now.AddMinutes(5).AddTicks(-1);
                 test.Client.Read(false);
                 Assert(test.Requests.Count == 2, "automatic polling waits five minutes after manual refresh");
@@ -61,8 +56,8 @@ namespace CodexUsageTray.Tests
                 test.Client.Read(false);
                 test.Now = test.Now.AddSeconds(Math.Max(300, retryAfter)).AddTicks(-1);
                 test.Client.Read(false);
-                test.Client.Read(true);
-                Assert(test.Requests.Count == 1, "automatic and forced reads honor rate limit backoff");
+                UsageSnapshot limited = test.Client.Read(true);
+                Assert(test.Requests.Count == 1 && limited == null, "automatic and forced reads honor rate limit backoff");
                 test.Now = test.Now.AddTicks(1);
                 test.Respond = delegate { return test.Success(); };
                 Assert(test.Client.Read(true) != null && test.Requests.Count == 2,
@@ -86,18 +81,25 @@ namespace CodexUsageTray.Tests
                     "failed requests retain the old reading and observation time with a stale status");
                 Assert(File.ReadAllText(test.CachePath) == stored, "failure does not rewrite the saved observation");
                 test.Now = test.Now.AddSeconds(59);
-                test.Client.Read(true);
-                Assert(test.Requests.Count == 2, "manual refresh also respects failure backoff");
-                test.Now = test.Now.AddSeconds(1);
+                test.Client.Read(false);
+                Assert(test.Requests.Count == 2, "automatic refresh respects ordinary failure backoff");
                 test.Respond = delegate { return test.Success(); };
-                UsageSnapshot recovered = test.Client.Read(false);
-                Assert(recovered != null && !recovered.IsStale && recovered.LastUpdated.ToUniversalTime() == test.Now,
-                    "successful retry restores a fresh observation");
+                UsageSnapshot recovered = test.Client.Read(true);
+                Assert(test.Requests.Count == 3 && recovered != null && !recovered.IsStale &&
+                    recovered.LastUpdated.ToUniversalTime() == test.Now,
+                    "manual retry bypasses ordinary failure backoff and restores a fresh observation");
                 test.Now = test.Now.AddMinutes(5);
                 test.Respond = delegate { return new ClaudeQuotaResponse { Status = 200, Body = "not json" }; };
                 UsageSnapshot malformed = test.Client.Read(false);
                 Assert(malformed != null && malformed.IsStale && malformed.LastUpdated == recovered.LastUpdated,
                     "malformed server data cannot replace the last valid observation");
+                test.Respond = delegate { return new ClaudeQuotaResponse { Status = 429, RetryAfterSeconds = 900 }; };
+                test.Client.Read(true);
+                int requestsBeforeCooldown = test.Requests.Count;
+                UsageSnapshot limited = test.Client.Read(true, delegate { throw new InvalidOperationException("Unexpected request"); });
+                Assert(test.Requests.Count == requestsBeforeCooldown && limited != null && limited.IsStale &&
+                    limited.StatusMessage.StartsWith("Claude rate limited - retry at "),
+                    "server cooldown explains why manual refresh waits and retains saved usage");
             }
         }
 
