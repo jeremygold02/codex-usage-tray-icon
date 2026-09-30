@@ -22,6 +22,7 @@ namespace CodexUsageTray.Tests
                 TestHistoryImport(Path.Combine(directory, "import.json"));
                 TestCycleAverage(Path.Combine(directory, "initial.json"));
                 TestImportSaveFailure(Path.Combine(directory, "unwritable.json"));
+                UsageForecastEdgeCasesTests.Run();
             }
             finally
             {

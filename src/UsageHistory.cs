@@ -313,8 +313,10 @@ namespace CodexUsageTray
             {
                 UsageHistoryWindow after = GetWindow(periodSamples[i], weekly);
                 if (!after.ResetAtUtc.HasValue || Math.Abs((after.ResetAtUtc.Value - reset).TotalMinutes) > 2) break;
+                // Use the same decrease tolerance as IsReset so measurement jitter
+                // cannot discard a valid cycle-average forecast and chart projection.
                 if (HasMatchingReset(periodSamples[i - 1], periodSamples[i], weekly) &&
-                    after.UsedPercent < GetWindow(periodSamples[i - 1], weekly).UsedPercent)
+                    after.UsedPercent < GetWindow(periodSamples[i - 1], weekly).UsedPercent - 0.001)
                     return false; // A banked reset invalidates the inferred cycle start.
             }
             ratePerHour = limit.UsedPercent * 3600 / elapsed;
