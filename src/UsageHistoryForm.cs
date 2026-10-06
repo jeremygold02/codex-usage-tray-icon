@@ -15,12 +15,9 @@ namespace CodexUsageTray
         private readonly HistoryChart chart;
         private readonly Label forecastLabel;
         private readonly Label detailLabel;
-        private readonly ToolTip actionToolTip = new ToolTip();
         private readonly Timer displayTimer = new Timer();
         private AppSettings settings;
         private UsageSnapshot snapshot;
-
-        public event EventHandler HistoryCleared;
 
         public UsageHistoryForm(UsageHistoryStore history, AppSettings settings)
             : this(history, settings, "Codex")
@@ -66,19 +63,10 @@ namespace CodexUsageTray
             tabs.AutoSize = true;
             tabs.Dock = DockStyle.Fill;
             tabs.Margin = new Padding(0, 0, 0, 8);
-            weeklyButton = CreatePeriodButton("&Weekly", "Weekly limit: all recorded history");
-            fiveHourButton = CreatePeriodButton("&5-hour", "Five-hour limit: all recorded history");
+            weeklyButton = CreatePeriodButton("&Weekly", "Weekly limit: history since the latest reset");
+            fiveHourButton = CreatePeriodButton("&5-hour", "Five-hour limit: history since the latest reset");
             tabs.Controls.Add(weeklyButton);
             tabs.Controls.Add(fiveHourButton);
-            Button clearButton = new Button();
-            clearButton.Text = "Clear history";
-            clearButton.AccessibleName = "Clear saved usage history";
-            clearButton.AutoSize = true;
-            clearButton.Margin = new Padding(8, 0, 0, 0);
-            clearButton.Click += ClearHistory;
-            tabs.Controls.Add(clearButton);
-            actionToolTip.SetToolTip(clearButton,
-                "History is saved for this Windows user. Clear it after switching " + provider + " accounts.");
             weeklyButton.Checked = true;
             weeklyButton.CheckedChanged += PeriodChanged;
             fiveHourButton.CheckedChanged += PeriodChanged;
@@ -115,6 +103,13 @@ namespace CodexUsageTray
         public void UpdateData(UsageSnapshot value)
         {
             snapshot = value;
+            bool hasFiveHourLimit = snapshot != null && snapshot.FiveHour != null;
+            fiveHourButton.Visible = hasFiveHourLimit;
+            if (!hasFiveHourLimit && fiveHourButton.Checked)
+            {
+                weeklyButton.Checked = true;
+                return; // CheckedChanged updates the chart for the weekly limit.
+            }
             DateTime nowUtc = DateTime.UtcNow;
             bool weekly = weeklyButton.Checked;
             chart.UpdateData(history.Samples, weekly, nowUtc);
@@ -150,7 +145,6 @@ namespace CodexUsageTray
             {
                 displayTimer.Stop();
                 displayTimer.Dispose();
-                actionToolTip.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -184,30 +178,6 @@ namespace CodexUsageTray
             if (chart != null && selected != null && selected.Checked)
             {
                 UpdateData(snapshot);
-            }
-        }
-
-        private void ClearHistory(object sender, EventArgs e)
-        {
-            if (MessageBox.Show(this, "Clear all saved usage history? New readings will start a fresh history.",
-                "Clear usage history", MessageBoxButtons.OKCancel, MessageBoxIcon.Question,
-                MessageBoxDefaultButton.Button2) != DialogResult.OK)
-            {
-                return;
-            }
-
-            bool saved = history.Clear();
-            UpdateData(snapshot);
-            EventHandler handler = HistoryCleared;
-            if (handler != null)
-            {
-                handler(this, EventArgs.Empty);
-            }
-            if (!saved)
-            {
-                MessageBox.Show(this, "History was cleared for this session, but the saved file could not be updated. " +
-                    "Previous readings may return after restarting the app.",
-                    "Usage history", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
 
@@ -259,6 +229,7 @@ namespace CodexUsageTray
             private bool weekly;
             private bool dark;
             private int selectedIndex = -1;
+            private DateTime? selectedProjectionUtc;
             private RectangleF plot;
 
             public event EventHandler SelectionChanged;
@@ -280,6 +251,7 @@ namespace CodexUsageTray
 
             public void UpdateData(List<UsageHistorySample> values, bool showWeekly, DateTime nowUtc)
             {
+                DateTime? projectedTimestamp = weekly == showWeekly ? selectedProjectionUtc : null;
                 DateTime? selectedTimestamp = weekly == showWeekly && selectedIndex >= 0 && selectedIndex < samples.Count
                     ? (DateTime?)samples[selectedIndex].TimestampUtc
                     : null;
@@ -305,6 +277,21 @@ namespace CodexUsageTray
                 {
                     return left.TimestampUtc.CompareTo(right.TimestampUtc);
                 });
+                if (samples.Count > 0)
+                {
+                    for (int i = samples.Count - 1; i > 0; i--)
+                    {
+                        if (UsageHistoryStore.IsReset(samples[i - 1], samples[i], weekly))
+                        {
+                            samples.RemoveRange(0, i);
+                            break;
+                        }
+                    }
+                }
+                // Keep both ends of a plateau for its duration, but discard the
+                // intermediate polls; only percentage changes are selectable.
+                for (int i = samples.Count - 2; i > 0; i--)
+                    if (!IsChangedReading(i) && !IsChangedReading(i + 1)) samples.RemoveAt(i);
                 if (samples.Count > 0) startUtc = samples[0].TimestampUtc;
                 if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
                 int retainedIndex = -1;
@@ -313,7 +300,7 @@ namespace CodexUsageTray
                     for (int i = 0; i < samples.Count; i++)
                     {
                         if (samples[i].TimestampUtc == selectedTimestamp.Value &&
-                            UsageHistoryStore.GetWindow(samples[i], weekly) != null)
+                            IsChangedReading(i))
                         {
                             retainedIndex = i;
                             break;
@@ -322,6 +309,7 @@ namespace CodexUsageTray
                 }
                 selectedIndex = -1;
                 SelectSample(retainedIndex);
+                selectedProjectionUtc = projectedTimestamp;
                 Invalidate();
             }
 
@@ -339,6 +327,13 @@ namespace CodexUsageTray
                 }
                 endUtc = projection != null && projection.EndUtc > observedEndUtc ? projection.EndUtc : observedEndUtc;
                 if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
+                if (selectedProjectionUtc.HasValue)
+                {
+                    DateTime timestamp = selectedProjectionUtc.Value;
+                    if (projection != null && timestamp >= projection.StartUtc && timestamp <= projection.EndUtc)
+                        SelectProjection(timestamp);
+                    else SelectSample(-1);
+                }
                 Invalidate();
             }
 
@@ -407,9 +402,25 @@ namespace CodexUsageTray
                     using (Pen projectionPen = new Pen(projectionColor, Math.Max(1.5f, 2 * scale)))
                     {
                         projectionPen.DashStyle = DashStyle.Dash;
-                        graphics.DrawLine(projectionPen, projectedStart, projectedEnd);
+                        PointF previous = projectedStart;
+                        if (projection.Points != null)
+                        {
+                            foreach (UsageProjectionPoint point in projection.Points)
+                            {
+                                PointF next = GetChartPoint(point.TimestampUtc, point.RemainingPercent);
+                                graphics.DrawLine(projectionPen, previous, next);
+                                previous = next;
+                            }
+                        }
+                        else graphics.DrawLine(projectionPen, projectedStart, projectedEnd);
                         projectionPen.DashStyle = DashStyle.Solid;
                         graphics.DrawEllipse(projectionPen, projectedEnd.X - 3 * scale, projectedEnd.Y - 3 * scale, 6 * scale, 6 * scale);
+                        if (selectedProjectionUtc.HasValue)
+                        {
+                            PointF selected = GetChartPoint(selectedProjectionUtc.Value, ProjectedRemaining(selectedProjectionUtc.Value));
+                            graphics.DrawLine(projectionPen, selected.X, plot.Top, selected.X, plot.Bottom);
+                            graphics.DrawEllipse(projectionPen, selected.X - 4 * scale, selected.Y - 4 * scale, 8 * scale, 8 * scale);
+                        }
                     }
                 }
 
@@ -447,7 +458,7 @@ namespace CodexUsageTray
                             graphics.DrawLine(resetPen, point.X, plot.Top, point.X, plot.Bottom);
                             graphics.FillRectangle(pointBrush, point.X - 3 * scale, point.Y - 3 * scale, 6 * scale, 6 * scale);
                         }
-                        else if (i == 0 || i == samples.Count - 1 || i == selectedIndex)
+                        else if (i == 0 || ((i == samples.Count - 1 || i == selectedIndex) && IsChangedReading(i)))
                         {
                             graphics.FillEllipse(pointBrush, point.X - 2 * scale, point.Y - 2 * scale, 4 * scale, 4 * scale);
                         }
@@ -478,12 +489,20 @@ namespace CodexUsageTray
                     SelectSample(-1);
                     return;
                 }
+                if (projection != null && e.X > GetChartPoint(projection.StartUtc, projection.StartRemainingPercent).X)
+                {
+                    double fraction = Math.Max(0, Math.Min(1, (e.X - plot.Left) / plot.Width));
+                    DateTime timestamp = startUtc.AddSeconds((endUtc - startUtc).TotalSeconds * fraction);
+                    if (timestamp > projection.EndUtc) timestamp = projection.EndUtc;
+                    SelectProjection(timestamp);
+                    return;
+                }
                 int nearest = -1;
                 double distance = double.MaxValue;
                 for (int i = 0; i < samples.Count; i++)
                 {
                     UsageHistoryWindow window = UsageHistoryStore.GetWindow(samples[i], weekly);
-                    if (window == null)
+                    if (window == null || !IsChangedReading(i))
                     {
                         continue;
                     }
@@ -532,7 +551,7 @@ namespace CodexUsageTray
                 {
                     next += direction;
                 }
-                while (next >= 0 && next < samples.Count && UsageHistoryStore.GetWindow(samples[next], weekly) == null);
+                while (next >= 0 && next < samples.Count && !IsChangedReading(next));
                 if (next >= 0 && next < samples.Count)
                 {
                     SelectSample(next);
@@ -544,7 +563,12 @@ namespace CodexUsageTray
             protected override void OnGotFocus(EventArgs e)
             {
                 base.OnGotFocus(e);
-                if (selectedIndex < 0 && samples.Count > 0) SelectSample(samples.Count - 1);
+                if (selectedIndex < 0 && !selectedProjectionUtc.HasValue && samples.Count > 0)
+                {
+                    int index = samples.Count - 1;
+                    while (index > 0 && !IsChangedReading(index)) index--;
+                    SelectSample(index);
+                }
             }
 
             protected override void OnLostFocus(EventArgs e)
@@ -567,11 +591,12 @@ namespace CodexUsageTray
 
             private void SelectSample(int index)
             {
-                if (index == selectedIndex && index >= 0)
+                if (index == selectedIndex && index >= 0 && !selectedProjectionUtc.HasValue)
                 {
                     return;
                 }
                 selectedIndex = index;
+                selectedProjectionUtc = null;
                 SelectedDetail = index < 0 ? "" : FormatDetail(index);
                 AccessibleDescription = string.IsNullOrEmpty(SelectedDetail)
                     ? LatestDetail + ". Use Left and Right to inspect recorded readings."
@@ -581,6 +606,49 @@ namespace CodexUsageTray
                 {
                     handler(this, EventArgs.Empty);
                 }
+                Invalidate();
+            }
+
+            private bool IsChangedReading(int index)
+            {
+                if (index == 0) return true;
+                UsageHistoryWindow before = UsageHistoryStore.GetWindow(samples[index - 1], weekly);
+                UsageHistoryWindow after = UsageHistoryStore.GetWindow(samples[index], weekly);
+                return Math.Abs(after.UsedPercent - before.UsedPercent) > 0.001 ||
+                    UsageHistoryStore.IsReset(samples[index - 1], samples[index], weekly);
+            }
+
+            private double ProjectedRemaining(DateTime timestamp)
+            {
+                DateTime before = projection.StartUtc;
+                double remaining = projection.StartRemainingPercent;
+                if (projection.Points != null)
+                {
+                    foreach (UsageProjectionPoint point in projection.Points)
+                    {
+                        if (point.TimestampUtc <= before) continue;
+                        if (timestamp <= point.TimestampUtc)
+                            return remaining + (point.RemainingPercent - remaining) *
+                                (timestamp - before).TotalSeconds / (point.TimestampUtc - before).TotalSeconds;
+                        before = point.TimestampUtc;
+                        remaining = point.RemainingPercent;
+                    }
+                }
+                return remaining + (projection.EndRemainingPercent - remaining) *
+                    (timestamp - before).TotalSeconds / Math.Max(1, (projection.EndUtc - before).TotalSeconds);
+            }
+
+            private void SelectProjection(DateTime timestamp)
+            {
+                selectedIndex = -1;
+                selectedProjectionUtc = timestamp;
+                double remaining = Math.Max(0, Math.Min(100, ProjectedRemaining(timestamp)));
+                SelectedDetail = "Projected: " + timestamp.ToLocalTime().ToString("G", CultureInfo.CurrentCulture) +
+                    Environment.NewLine + "\u2248" + remaining.ToString("0.#", CultureInfo.CurrentCulture) +
+                    "% remaining  |  \u2248" + (100 - remaining).ToString("0.#", CultureInfo.CurrentCulture) + "% used";
+                AccessibleDescription = SelectedDetail;
+                EventHandler handler = SelectionChanged;
+                if (handler != null) handler(this, EventArgs.Empty);
                 Invalidate();
             }
 

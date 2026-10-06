@@ -30,6 +30,8 @@ namespace CodexUsageTray.Tests
 
                 samples[0].Weekly.UsedPercent = 0;
                 Update(chart, samples, true, now);
+                Assert(GetDate(chart, "startUtc") == samples[0].TimestampUtc && GetSamples(chart).Count == 1,
+                    "weekly view starts at the first reading after the latest usage reset");
                 Assert(CountMiddleLinePixels(chart) == 0, "a reset is not interpolated as gradual replenishment");
 
                 Update(chart, samples, false, now);
@@ -41,7 +43,130 @@ namespace CodexUsageTray.Tests
                 Assert(GetDate(chart, "endUtc") > GetDate(chart, "startUtc"), "empty chart has a safe range");
                 CountMiddleLinePixels(chart);
                 TestInspectionAndProjection(chart, form, now);
+                TestResetCycles(chart, form, now);
+                TestAvailableLimits(form, now);
+                TestPlateauInspection(chart, form, now);
             }
+        }
+
+        private static void TestResetCycles(Control chart, UsageHistoryForm form, DateTime now)
+        {
+            List<UsageHistorySample> samples = new List<UsageHistorySample>
+            {
+                Sample(now.AddDays(-8), 10), Sample(now.AddDays(-7), 80),
+                Sample(now.AddDays(-6), 0), Sample(now.AddDays(-5), 30)
+            };
+            Update(chart, samples, true, now);
+            Assert(GetDate(chart, "startUtc") == samples[2].TimestampUtc && GetSamples(chart).Count == 2,
+                "previous weekly cycles are excluded after sorting the readings");
+            Raise(chart, "OnKeyDown", new KeyEventArgs(Keys.Home));
+            Label detail = (Label)typeof(UsageHistoryForm).GetField("detailLabel", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+            Assert(detail.Text.Contains("100% remaining"), "keyboard inspection starts in the current cycle");
+
+            samples.Add(Sample(now.AddHours(-2), 0));
+            samples.Add(Sample(now.AddHours(-1), 20));
+            Update(chart, samples, true, now);
+            Assert(GetDate(chart, "startUtc") == samples[4].TimestampUtc && GetSamples(chart).Count == 2 &&
+                detail.Text.Contains("Latest:") && detail.Text.Contains("80% remaining"),
+                "another reset advances the chart and clears selection from the previous cycle");
+            Assert(samples.Count == 6, "cropping the chart preserves retained source history");
+
+            samples = new List<UsageHistorySample>
+            {
+                Sample(now.AddHours(-4), 20), Sample(now.AddHours(-3), 40),
+                Sample(now.AddHours(-1), 45), Sample(now, 50)
+            };
+            DateTime oldReset = now.AddHours(-2);
+            samples[0].Weekly.ResetAtUtc = oldReset;
+            samples[1].Weekly.ResetAtUtc = oldReset;
+            samples[2].Weekly.ResetAtUtc = oldReset.AddDays(7);
+            samples[3].Weekly.ResetAtUtc = oldReset.AddDays(7);
+            Update(chart, samples, true, now);
+            Assert(GetDate(chart, "startUtc") == samples[2].TimestampUtc,
+                "a new reset deadline starts a new cycle even if the percentage did not decrease");
+
+            samples[0].Weekly.ResetAtUtc = now.AddDays(1);
+            samples[1].Weekly.ResetAtUtc = now.AddDays(1).AddSeconds(30);
+            samples[2].Weekly.ResetAtUtc = now.AddDays(1).AddSeconds(45);
+            samples[3].Weekly.ResetAtUtc = now.AddDays(1).AddSeconds(60);
+            Update(chart, samples, true, now);
+            Assert(GetDate(chart, "startUtc") == samples[0].TimestampUtc,
+                "small reset deadline variations do not crop valid readings");
+        }
+
+        private static void TestAvailableLimits(UsageHistoryForm form, DateTime now)
+        {
+            RadioButton weekly = (RadioButton)typeof(UsageHistoryForm).GetField("weeklyButton", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+            RadioButton fiveHour = (RadioButton)typeof(UsageHistoryForm).GetField("fiveHourButton", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+            UsageSnapshot snapshot = new UsageSnapshot
+            {
+                LastUpdated = now,
+                Weekly = new LimitWindow { UsedPercent = 20, WindowMinutes = 10080 },
+                FiveHour = new LimitWindow { UsedPercent = 10, WindowMinutes = 300 }
+            };
+            form.UpdateData(snapshot);
+            Assert(!ContainsClearButton(form), "history window has no accidental clear-history action");
+            form.Show();
+            try
+            {
+                Assert(fiveHour.Visible, "five-hour selector is shown when the account reports a five-hour limit");
+                fiveHour.Checked = true;
+                snapshot.FiveHour = null;
+                form.UpdateData(snapshot);
+                Assert(!fiveHour.Visible && weekly.Checked,
+                    "missing five-hour limit hides the selector and switches an open five-hour view to weekly");
+                snapshot.FiveHour = new LimitWindow { UsedPercent = 10, WindowMinutes = 300 };
+                form.UpdateData(snapshot);
+                Assert(fiveHour.Visible && weekly.Checked, "five-hour selector returns when the limit becomes available");
+            }
+            finally { form.Hide(); }
+        }
+
+        private static bool ContainsClearButton(Control control)
+        {
+            if (control is Button && control.Text == "Clear history") return true;
+            foreach (Control child in control.Controls)
+                if (ContainsClearButton(child)) return true;
+            return false;
+        }
+
+        private static void TestPlateauInspection(Control chart, UsageHistoryForm form, DateTime now)
+        {
+            List<UsageHistorySample> samples = new List<UsageHistorySample>
+            {
+                Sample(now.AddHours(-2), 15), Sample(now.AddHours(-1), 19),
+                Sample(now.AddMinutes(-45), 19), Sample(now.AddMinutes(-30), 19), Sample(now, 19)
+            };
+            Update(chart, samples, true, now);
+            Assert(GetSamples(chart).Count == 3,
+                "repeated polls are coalesced while the first and latest plateau times remain available");
+            Raise(chart, "OnKeyDown", new KeyEventArgs(Keys.End));
+            Label detail = (Label)typeof(UsageHistoryForm).GetField("detailLabel", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+            Assert(detail.Text.Contains(now.AddHours(-1).ToLocalTime().ToString("G")),
+                "inspection selects the percentage change rather than repeated unchanged polls");
+            Raise(chart, "OnMouseLeave", EventArgs.Empty);
+            Assert(detail.Text.Contains(now.ToLocalTime().ToString("G")), "latest-reading timestamp still stays current");
+
+            UsageProjection projection = new UsageProjection
+            {
+                StartUtc = now, EndUtc = now.AddHours(2), StartRemainingPercent = 81, EndRemainingPercent = 60,
+                Points = new List<UsageProjectionPoint>
+                {
+                    new UsageProjectionPoint { TimestampUtc = now, RemainingPercent = 81 },
+                    new UsageProjectionPoint { TimestampUtc = now.AddHours(1), RemainingPercent = 80 },
+                    new UsageProjectionPoint { TimestampUtc = now.AddHours(2), RemainingPercent = 60 }
+                }
+            };
+            chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
+            CountMiddleLinePixels(chart);
+            chart.GetType().GetMethod("SelectProjection", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(chart, new object[] { now.AddHours(1) });
+            Assert(detail.Text.Contains("Projected:") && detail.Text.Contains("80% remaining"),
+                "projected hover uses the curved path rather than a straight endpoint interpolation");
+            Update(chart, samples, true, now);
+            chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
+            Assert(detail.Text.Contains("Projected:") && detail.Text.Contains("80% remaining"),
+                "refreshing chart data retains an active forecast inspection");
         }
 
         private static void TestInspectionAndProjection(Control chart, UsageHistoryForm form, DateTime now)
@@ -83,7 +208,10 @@ namespace CodexUsageTray.Tests
             CountMiddleLinePixels(chart);
             plot = (RectangleF)chart.GetType().GetField("plot", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
             Raise(chart, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, (int)plot.Right - 2, (int)plot.Top + 20, 0));
-            Assert(detail.Text.Contains("60% remaining") && !detail.Text.Contains("10% remaining"), "forecast area snaps to a real reading, not invented observations");
+            Assert(detail.Text.Contains("Projected:") && detail.Text.Contains("remaining"), "forecast area shows an explicitly estimated reading at the hovered time");
+            Raise(chart, "OnMouseLeave", EventArgs.Empty);
+            Assert(detail.Text.Contains("Latest:") && detail.Text.Contains("60% remaining"),
+                "leaving projected usage restores the latest recorded reading");
             projection.StartUtc = now;
             chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
             Assert(GetDate(chart, "endUtc") == now, "projection unrelated to latest recorded point is hidden");
@@ -113,6 +241,11 @@ namespace CodexUsageTray.Tests
         private static DateTime GetDate(Control chart, string field)
         {
             return (DateTime)chart.GetType().GetField(field, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
+        }
+
+        private static List<UsageHistorySample> GetSamples(Control chart)
+        {
+            return (List<UsageHistorySample>)chart.GetType().GetField("samples", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
         }
 
         private static int CountMiddleLinePixels(Control chart)

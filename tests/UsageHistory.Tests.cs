@@ -22,6 +22,7 @@ namespace CodexUsageTray.Tests
                 TestHistoryImport(Path.Combine(directory, "import.json"));
                 TestCycleAverage(Path.Combine(directory, "initial.json"));
                 TestImportSaveFailure(Path.Combine(directory, "unwritable.json"));
+                TestCycleRetention(Path.Combine(directory, "retention.json"));
                 UsageForecastEdgeCasesTests.Run();
             }
             finally
@@ -184,7 +185,7 @@ namespace CodexUsageTray.Tests
             Assert(store.GetProjection(true, latest, queriedAt) == null, "insufficient rate information has no projection");
             latest = Snapshot(reading, 20, reading.AddDays(6));
             latest.IsRefreshing = true;
-            Assert(store.GetProjection(true, latest, queriedAt) == null, "refresh in progress suppresses projection");
+            Assert(store.GetProjection(true, latest, queriedAt) != null, "refresh in progress retains the last valid projection");
             latest.IsRefreshing = false;
             latest.IsPaused = true;
             Assert(store.GetProjection(true, latest, queriedAt) == null, "paused data suppresses projection");
@@ -228,16 +229,19 @@ namespace CodexUsageTray.Tests
 
             store.Clear();
             store.Observe(Snapshot(now.AddMinutes(-30), 90, reset));
+            UsageHistorySample beforeReset = store.Samples[0];
             store.Observe(Snapshot(now.AddMinutes(-15), 10, reset));
             latest = Snapshot(now, 20, reset);
             store.Observe(latest);
             samples = store.Samples;
-            Assert(UsageHistoryStore.IsReset(samples[0], samples[1], false), "banked reset detected from a decrease");
-            Assert(!UsageHistoryStore.IsContinuous(samples[0], samples[1], false), "chart does not connect across banked reset");
+            Assert(UsageHistoryStore.IsReset(beforeReset, samples[0], false), "banked reset detected from a decrease");
+            Assert(!UsageHistoryStore.IsContinuous(beforeReset, samples[0], false), "chart does not connect across banked reset");
+            Assert(samples.Count == 2 && samples[0].FiveHour.UsedPercent == 10,
+                "completed cycles are removed from stored history");
             Assert(store.GetForecast(false, latest, now) == "Learning usage pace...", "forecast cannot reuse consumption before reset");
-            samples[1].FiveHour.UsedPercent = 95;
-            samples[1].FiveHour.ResetAtUtc = reset.AddHours(5);
-            Assert(UsageHistoryStore.IsReset(samples[0], samples[1], false), "changed reset deadline detects new cycle even when usage increased");
+            samples[0].FiveHour.UsedPercent = 95;
+            samples[0].FiveHour.ResetAtUtc = reset.AddHours(5);
+            Assert(UsageHistoryStore.IsReset(beforeReset, samples[0], false), "changed reset deadline detects new cycle even when usage increased");
         }
 
         private static void TestWeeklyDepletion(string path)
@@ -310,6 +314,36 @@ namespace CodexUsageTray.Tests
             Assert(projection != null && projection.EndsAtReset &&
                 Math.Abs(projection.EndRemainingPercent - 22) < 0.001,
                 "recent idle time slows consumption instead of being discarded");
+        }
+
+        private static void TestCycleRetention(string path)
+        {
+            DateTime now = DateTime.UtcNow.AddSeconds(-1);
+            DateTime oldReset = now.AddHours(-3);
+            DateTime reset = oldReset.AddDays(7);
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            store.Observe(Snapshot(now.AddDays(-1), 50, oldReset));
+            store.Observe(Snapshot(now.AddHours(-4), 90, oldReset));
+            store.Observe(Snapshot(now.AddHours(-2), 0, reset));
+            store.Observe(Snapshot(now.AddHours(-1), 10, reset));
+            Assert(store.Samples.Count == 2 && store.Samples[0].TimestampUtc == now.AddHours(-2),
+                "only readings since the latest reset remain in memory");
+            store = new UsageHistoryStore(path);
+            Assert(store.Samples.Count == 2 && !File.ReadAllText(path).Contains("UsedPercent\":90"),
+                "completed cycles are removed from the saved history file");
+            UsageSnapshot latest = Snapshot(now, 10, reset);
+            store.Observe(latest);
+            store = new UsageHistoryStore(path);
+            Assert(store.Samples.Count == 3, "later idle readings preserve the current cycle after restart");
+
+            store.Clear();
+            store.Observe(Snapshot(now.AddHours(-2), 90, reset));
+            store.Observe(Snapshot(now.AddMinutes(-30), 10, reset));
+            store = new UsageHistoryStore(path);
+            latest = Snapshot(now, 15, reset);
+            store.Observe(latest);
+            Assert(store.GetForecast(true, latest, now) == "Learning usage pace...",
+                "pruning and restart preserve banked-reset evidence so a cycle average cannot reuse the old start");
         }
 
         private static void TestCorruptHistory(string path)

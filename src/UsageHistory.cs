@@ -12,6 +12,7 @@ namespace CodexUsageTray
         public double UsedPercent;
         public DateTime? ResetAtUtc;
         public int? WindowMinutes;
+        public bool CycleAverageUnavailable;
 
         public UsageHistoryWindow() { }
 
@@ -40,6 +41,12 @@ namespace CodexUsageTray
         }
     }
 
+    internal sealed class UsageProjectionPoint
+    {
+        public DateTime TimestampUtc;
+        public double RemainingPercent;
+    }
+
     internal sealed class UsageProjection
     {
         public DateTime StartUtc;
@@ -47,6 +54,10 @@ namespace CodexUsageTray
         public double StartRemainingPercent;
         public double EndRemainingPercent;
         public bool EndsAtReset;
+        public bool UsesDailyPattern;
+        public bool UsesValidatedModel;
+        public bool UsesSessionPace;
+        public List<UsageProjectionPoint> Points;
     }
 
     internal sealed class UsageHistoryStore
@@ -55,6 +66,10 @@ namespace CodexUsageTray
         private const int MaxFileBytes = 16 * 1024 * 1024;
         private readonly string path;
         private readonly List<UsageHistorySample> samples = new List<UsageHistorySample>();
+        private UsagePatternForecast patternForecast;
+        private DateTime patternTimestamp;
+        private int patternSampleCount = -1;
+        private double patternRate;
         public bool ImportCompleted { get; private set; }
 
         public UsageHistoryStore(string path)
@@ -190,6 +205,15 @@ namespace CodexUsageTray
             if (limit.UsedPercent >= 100) return "Usage limit reached";
             UsageHistoryWindow window = FromLimit(limit, snapshot.LastUpdated.ToUniversalTime());
             if (window.ResetAtUtc.HasValue && window.ResetAtUtc.Value <= nowUtc) return "Awaiting reset update";
+            if (weekly)
+            {
+                UsageProjection pattern = GetProjection(true, snapshot, nowUtc);
+                if (pattern != null && pattern.UsesValidatedModel)
+                    return pattern.EndsAtReset ? "Will last until reset" : "\u2248" +
+                        FormatDuration((pattern.EndUtc - pattern.StartUtc).TotalHours) +
+                        (pattern.UsesDailyPattern ? " left at usual daily pattern" :
+                            pattern.UsesSessionPace ? " left at recent session pace" : " left at recent daily pace");
+            }
             List<UsageHistorySample> periodSamples = samples.FindAll(
                 delegate(UsageHistorySample sample) { return GetWindow(sample, weekly) != null; });
             double ratePerHour;
@@ -206,7 +230,7 @@ namespace CodexUsageTray
         public UsageProjection GetProjection(bool weekly, UsageSnapshot snapshot, DateTime nowUtc)
         {
             nowUtc = nowUtc.ToUniversalTime();
-            if (!IsFresh(snapshot, nowUtc) || snapshot.IsRefreshing) return null;
+            if (!IsFresh(snapshot, nowUtc)) return null;
             LimitWindow limit = weekly ? snapshot.Weekly : snapshot.FiveHour;
             if (limit == null || limit.UsedPercent >= 100 || !limit.ResetAfterSeconds.HasValue) return null;
 
@@ -221,6 +245,16 @@ namespace CodexUsageTray
                 !TryGetCycleAverageRate(weekly, snapshot, periodSamples, out ratePerHour)) return null;
 
             double remaining = 100 - limit.UsedPercent;
+            if (weekly && periodSamples.Count > 0)
+            {
+                UsageHistorySample latest = periodSamples[periodSamples.Count - 1];
+                if (Math.Abs((latest.TimestampUtc - startUtc).TotalSeconds) <= 1 &&
+                    Math.Abs(latest.Weekly.UsedPercent - limit.UsedPercent) < 0.001)
+                {
+                    UsagePatternForecast pattern = GetPatternForecast(periodSamples, ratePerHour);
+                    if (pattern != null) return pattern.Project(startUtc, resetUtc, remaining);
+                }
+            }
             double hoursUntilReset = (resetUtc - startUtc).TotalHours;
             bool endsAtReset = ratePerHour <= 0 || remaining / ratePerHour >= hoursUntilReset;
             DateTime endUtc = endsAtReset ? resetUtc : startUtc.AddHours(remaining / ratePerHour);
@@ -234,8 +268,35 @@ namespace CodexUsageTray
             };
         }
 
-        private static bool TryGetRecentRate(bool weekly, UsageSnapshot snapshot,
+        private UsagePatternForecast GetPatternForecast(List<UsageHistorySample> periodSamples, double ratePerHour)
+        {
+            DateTime timestamp = periodSamples[periodSamples.Count - 1].TimestampUtc;
+            if (patternSampleCount != periodSamples.Count || patternTimestamp != timestamp || patternRate != ratePerHour)
+            {
+                patternForecast = UsagePatternForecast.TryCreate(periodSamples, ratePerHour);
+                patternTimestamp = timestamp;
+                patternSampleCount = periodSamples.Count;
+                patternRate = ratePerHour;
+            }
+            return patternForecast;
+        }
+
+        internal static bool TryGetRecentRate(bool weekly, UsageSnapshot snapshot,
             List<UsageHistorySample> periodSamples, out double ratePerHour)
+        {
+            return TryGetRecentRate(weekly, snapshot, periodSamples, weekly ? 48 : 1,
+                weekly ? 6 : 0.25, weekly ? 6 : 0.25, weekly, out ratePerHour);
+        }
+
+        internal static bool TryGetSessionRate(UsageSnapshot snapshot,
+            List<UsageHistorySample> periodSamples, out double ratePerHour)
+        {
+            return TryGetRecentRate(true, snapshot, periodSamples, 6, 1, 0.5, false, out ratePerHour);
+        }
+
+        private static bool TryGetRecentRate(bool weekly, UsageSnapshot snapshot,
+            List<UsageHistorySample> periodSamples, double lookbackHours, double halfLifeHours,
+            double minimumHours, bool bridgeGaps, out double ratePerHour)
         {
             ratePerHour = 0;
             if (periodSamples.Count < 3) return false;
@@ -246,7 +307,7 @@ namespace CodexUsageTray
             if (lastWindow == null || Math.Abs((last.TimestampUtc - snapshot.LastUpdated.ToUniversalTime()).TotalSeconds) > 1 ||
                 Math.Abs(lastWindow.UsedPercent - limit.UsedPercent) > 0.001) return false;
 
-            DateTime cutoff = last.TimestampUtc.AddHours(weekly ? -48 : -1);
+            DateTime cutoff = last.TimestampUtc.AddHours(-lookbackHours);
             int start = end;
             while (start > 0 && periodSamples[start - 1].TimestampUtc >= cutoff)
             {
@@ -256,16 +317,16 @@ namespace CodexUsageTray
                 // Overnight observations still give a valid weekly wall-clock average
                 // when a known reset deadline proves they belong to the same cycle.
                 if (!IsContinuous(before, after, weekly) &&
-                    (!weekly || !HasMatchingReset(before, after, weekly))) break;
+                    (!bridgeGaps || !HasMatchingReset(before, after, weekly))) break;
                 start--;
             }
 
             double hours = (last.TimestampUtc - periodSamples[start].TimestampUtc).TotalHours;
-            if (end - start < 2 || hours < (weekly ? 6 : 0.25)) return false;
+            if (end - start < 2 || hours < minimumHours) return false;
             // Weight elapsed time, not sample count: frequent polling must not amplify
             // a burst. Integrating the decay over each interval also keeps a steady
             // rate unchanged when the same interval is split into more observations.
-            double decayPerHour = Math.Log(2) / (weekly ? 6 : 0.25);
+            double decayPerHour = Math.Log(2) / halfLifeHours;
             double weightedRate = 0;
             double totalWeight = 0;
             for (int i = start + 1; i <= end; i++)
@@ -298,7 +359,7 @@ namespace CodexUsageTray
             return "\u2248" + FormatDuration(remainingHours) + " left at cycle average";
         }
 
-        private static bool TryGetCycleAverageRate(bool weekly, UsageSnapshot snapshot,
+        internal static bool TryGetCycleAverageRate(bool weekly, UsageSnapshot snapshot,
             List<UsageHistorySample> periodSamples, out double ratePerHour)
         {
             ratePerHour = 0;
@@ -309,6 +370,12 @@ namespace CodexUsageTray
             // OpenQuota's pacing approach: avoid projecting the very start of a window.
             if (elapsed < Math.Max(60, duration * 0.01) || elapsed >= duration) return false;
             DateTime reset = snapshot.LastUpdated.ToUniversalTime().AddSeconds(limit.ResetAfterSeconds.Value);
+            if (periodSamples.Count > 0)
+            {
+                UsageHistoryWindow last = GetWindow(periodSamples[periodSamples.Count - 1], weekly);
+                if (last.CycleAverageUnavailable && last.ResetAtUtc.HasValue &&
+                    Math.Abs((last.ResetAtUtc.Value - reset).TotalMinutes) <= 2) return false;
+            }
             for (int i = periodSamples.Count - 1; i > 0; i--)
             {
                 UsageHistoryWindow after = GetWindow(periodSamples[i], weekly);
@@ -390,6 +457,38 @@ namespace CodexUsageTray
             DateTime earliest = nowUtc.AddDays(-14);
             samples.RemoveAll(delegate(UsageHistorySample sample) { return sample.TimestampUtc < earliest; });
             if (samples.Count > MaxSamples) samples.RemoveRange(0, samples.Count - MaxSamples);
+            PruneCycle(true);
+            PruneCycle(false);
+            samples.RemoveAll(delegate(UsageHistorySample sample) { return sample.Weekly == null && sample.FiveHour == null; });
+            patternSampleCount = -1;
+        }
+
+        private void PruneCycle(bool weekly)
+        {
+            DateTime start = DateTime.MinValue;
+            UsageHistorySample previous = null;
+            bool invalidAverage = false;
+            foreach (UsageHistorySample sample in samples)
+            {
+                UsageHistoryWindow window = GetWindow(sample, weekly);
+                if (window == null) continue;
+                if (previous != null && IsReset(previous, sample, weekly))
+                {
+                    start = sample.TimestampUtc;
+                    invalidAverage = HasMatchingReset(previous, sample, weekly) &&
+                        window.UsedPercent < GetWindow(previous, weekly).UsedPercent - 0.001;
+                }
+                invalidAverage = invalidAverage || window.CycleAverageUnavailable;
+                window.CycleAverageUnavailable = invalidAverage;
+                previous = sample;
+            }
+            if (start == DateTime.MinValue) return;
+            foreach (UsageHistorySample sample in samples)
+            {
+                if (sample.TimestampUtc >= start) break;
+                if (weekly) sample.Weekly = null;
+                else sample.FiveHour = null;
+            }
         }
 
         private bool Load()
@@ -420,6 +519,7 @@ namespace CodexUsageTray
                     previous = sample.TimestampUtc;
                 }
                 Prune(now);
+                Save(); // Persist cycle pruning when upgrading an existing history file.
                 return true;
             }
             catch (Exception)

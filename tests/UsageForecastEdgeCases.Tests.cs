@@ -86,7 +86,8 @@ namespace CodexUsageTray.Tests
                     UsageSnapshot latest = Snapshot(now, weekly ? 40 : 30, reset);
                     Observe(store, latest);
                     List<UsageHistorySample> samples = store.Samples;
-                    Assert(UsageHistoryStore.IsReset(samples[0], samples[1], weekly), "the old cycle has a reset boundary");
+                    Assert(samples.Count == 3 && samples[0].TimestampUtc == now.AddHours(-2 * stepHours),
+                        "the old cycle is pruned at the reset boundary");
                     UsageProjection projection = store.GetProjection(weekly, latest, now);
                     double expectedHours = weekly ? 20 : 1.75;
                     Assert(projection != null && !projection.EndsAtReset &&

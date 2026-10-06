@@ -1617,7 +1617,6 @@ namespace CodexUsageTray
             if (historyForm == null || historyForm.IsDisposed)
             {
                 historyForm = new UsageHistoryForm(usageHistory, settings);
-                historyForm.HistoryCleared += delegate { UpdateUsagePopup(currentSnapshot); };
             }
             historyForm.UpdateData(currentSnapshot);
             if (historyForm.WindowState == FormWindowState.Minimized) historyForm.WindowState = FormWindowState.Normal;
@@ -1631,11 +1630,6 @@ namespace CodexUsageTray
             if (claudeHistoryForm == null || claudeHistoryForm.IsDisposed)
             {
                 claudeHistoryForm = new UsageHistoryForm(claudeHistory, settings, "Claude");
-                claudeHistoryForm.HistoryCleared += delegate
-                {
-                    if (usagePopup != null && !usagePopup.IsDisposed)
-                        usagePopup.UpdateClaudeSnapshot(claudeSnapshot, claudeHistory);
-                };
             }
             claudeHistoryForm.UpdateData(claudeSnapshot);
             if (claudeHistoryForm.WindowState == FormWindowState.Minimized)
