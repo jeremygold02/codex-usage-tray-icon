@@ -19,6 +19,7 @@ namespace CodexUsageTray.Tests
             {
                 TestParsing(now);
                 TestScanning(home, now);
+                TestIncrementalScanning(home, now);
                 TestCancellation(home, now);
             }
             finally
@@ -56,8 +57,8 @@ namespace CodexUsageTray.Tests
             Assert(CodexHistoryImporter.ParseLine(Event(now.AddMinutes(-20), Window(10, 60, fiveReset),
                 null, "codex"), current, now) == null,
                 "wrong window duration is excluded");
-            Assert(CodexHistoryImporter.ParseLine(Event(now.AddDays(-15), five, week, "codex"), current, now) == null,
-                "samples older than 14 days are excluded");
+            Assert(CodexHistoryImporter.ParseLine(Event(now.AddDays(-29), five, week, "codex"), current, now) == null,
+                "samples older than four weeks are excluded");
             Assert(CodexHistoryImporter.ParseLine(Event(now.AddSeconds(1), five, week, "codex"), current, now) == null,
                 "future samples are excluded");
             Assert(CodexHistoryImporter.ParseLine(Event(now.AddMinutes(-5), five, null, "codex"),
@@ -66,6 +67,14 @@ namespace CodexUsageTray.Tests
             Assert(CodexHistoryImporter.ParseLine(Event(now.AddHours(-4), five, null, "codex"),
                 current, now) == null,
                 "a reset deadline beyond the five-hour cycle is excluded");
+            parsed = CodexHistoryImporter.ParseLine(Event(now.AddDays(-6), null,
+                Window(80, 10080, weekReset.AddDays(-7)), "codex"), current, now);
+            Assert(parsed != null && parsed.Weekly.UsedPercent == 80,
+                "prior reset cycles within 14 days are available for learning");
+            Assert(CodexHistoryImporter.ParseLine(Event(now.AddDays(-6), null,
+                Window(80, 10080, weekReset.AddDays(-7)), "codex"),
+                new UsageSnapshot { LastUpdated = now, FiveHour = current.FiveHour }, now) == null,
+                "history cannot add a window missing from the current account");
             Assert(CodexHistoryImporter.ParseLine("{invalid", current, now) == null,
                 "malformed events are ignored");
             Assert(CodexHistoryImporter.ParseLine(Event(now.AddMinutes(-20), five, week, "codex"),
@@ -82,13 +91,12 @@ namespace CodexUsageTray.Tests
             Directory.CreateDirectory(sessions);
             Directory.CreateDirectory(archived);
             string first = Event(now.AddMinutes(-40), Window(5, 300, fiveReset), null, "codex");
-            string second = Event(now.AddMinutes(-20), Window(25, 300, fiveReset),
-                Window(40, 10080, weekReset), "codex");
+            string second = Event(now.AddMinutes(-20), Window(25, 300, fiveReset), null, "codex");
             string duplicate = Event(now.AddMinutes(-20), null, Window(40, 10080, weekReset), "codex");
             File.WriteAllText(Path.Combine(sessions, "live.jsonl"),
                 "{invalid\n" + new string('x', 65537) + "\n" + second + "\n" + first + "\n",
                 new UTF8Encoding(false));
-            File.WriteAllText(Path.Combine(archived, "old.jsonl"), duplicate + "\n",
+            File.WriteAllText(Path.Combine(archived, "old.jsonl"), duplicate,
                 new UTF8Encoding(false));
             List<UsageSnapshot> snapshots = CodexHistoryImporter.ReadSnapshots(home, current, now,
                 CancellationToken.None);
@@ -97,7 +105,7 @@ namespace CodexUsageTray.Tests
                 snapshots[1].LastUpdated.ToUniversalTime() == now.AddMinutes(-20),
                 "samples are sorted by event time");
             Assert(snapshots[1].FiveHour != null && snapshots[1].Weekly != null,
-                "duplicate event retains independently available windows");
+                "duplicate event without a trailing newline retains independently available windows");
             Assert(CodexHistoryImporter.ReadSnapshots(Path.Combine(home, "missing"), current, now,
                 CancellationToken.None).Count == 0, "missing session directories are harmless");
         }
@@ -109,6 +117,34 @@ namespace CodexUsageTray.Tests
             Assert(CodexHistoryImporter.ReadSnapshots(home, Current(now, now.AddHours(2),
                 now.AddDays(3)), now, source.Token).Count == 0,
                 "pre-canceled scan returns no samples");
+        }
+
+        private static void TestIncrementalScanning(string home, DateTime now)
+        {
+            string directory = Path.Combine(home, "incremental", "sessions");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, "append.jsonl");
+            DateTime reset = now.AddDays(3);
+            UsageSnapshot current = Current(now, now.AddHours(2), reset);
+            CodexHistoryImporter importer = new CodexHistoryImporter();
+            string first = Event(now.AddMinutes(-20), null, Window(20, 10080, reset), "codex") + "\n";
+            string second = Event(now.AddMinutes(-10), null, Window(21, 10080, reset), "codex") + "\n";
+            File.WriteAllText(path, first, new UTF8Encoding(false));
+            string root = Path.GetDirectoryName(directory);
+            Assert(importer.ReadUpdates(root, current, now, CancellationToken.None).Count == 1,
+                "initial incremental scan reads the existing log");
+            Assert(importer.ReadUpdates(root, current, now, CancellationToken.None).Count == 0 &&
+                importer.LastScanBytes == 0, "unchanged logs are not reread");
+            File.AppendAllText(path, second.Substring(0, second.Length / 2), new UTF8Encoding(false));
+            Assert(importer.ReadUpdates(root, current, now, CancellationToken.None).Count == 0,
+                "partial appended lines wait until the writer finishes");
+            File.AppendAllText(path, second.Substring(second.Length / 2), new UTF8Encoding(false));
+            Assert(importer.ReadUpdates(root, current, now, CancellationToken.None).Count == 1 &&
+                importer.LastScanBytes == Encoding.UTF8.GetByteCount(second),
+                "completed appended lines are read without rescanning the prefix");
+            File.WriteAllText(path, first, new UTF8Encoding(false));
+            Assert(importer.ReadUpdates(root, current, now, CancellationToken.None).Count == 1,
+                "truncated logs restart from the beginning");
         }
 
         private static UsageSnapshot Current(DateTime now, DateTime fiveReset, DateTime weekReset)

@@ -13,6 +13,7 @@ namespace CodexUsageTray
         public DateTime? ResetAtUtc;
         public int? WindowMinutes;
         public bool CycleAverageUnavailable;
+        public bool IsImported;
 
         public UsageHistoryWindow() { }
 
@@ -57,13 +58,16 @@ namespace CodexUsageTray
         public bool UsesDailyPattern;
         public bool UsesValidatedModel;
         public bool UsesSessionPace;
+        public bool UsesInactiveHours;
         public List<UsageProjectionPoint> Points;
     }
 
     internal sealed class UsageHistoryStore
     {
         private const int MaxSamples = 45000;
+        internal const int RetentionDays = 28;
         private const int MaxFileBytes = 16 * 1024 * 1024;
+        private const string ImportVersion = "2";
         private readonly string path;
         private readonly List<UsageHistorySample> samples = new List<UsageHistorySample>();
         private UsagePatternForecast patternForecast;
@@ -76,7 +80,11 @@ namespace CodexUsageTray
         {
             this.path = path;
             bool loaded = Load();
-            ImportCompleted = loaded && File.Exists(path + ".imported");
+            if (loaded)
+            {
+                try { ImportCompleted = File.ReadAllText(path + ".imported").Trim() == ImportVersion; }
+                catch (Exception) { }
+            }
         }
 
         public static string DefaultPath
@@ -103,7 +111,7 @@ namespace CodexUsageTray
             if (!IsValidSnapshot(snapshot) || snapshot.IsRefreshing || snapshot.IsPaused) return false;
             DateTime timestamp = snapshot.LastUpdated.ToUniversalTime();
             DateTime now = DateTime.UtcNow;
-            if (timestamp < now.AddDays(-14) || timestamp > now.AddMinutes(1) ||
+            if (timestamp < now.AddDays(-RetentionDays) || timestamp > now.AddMinutes(1) ||
                 (samples.Count > 0 && timestamp <= samples[samples.Count - 1].TimestampUtc)) return false;
 
             samples.Add(new UsageHistorySample
@@ -125,9 +133,9 @@ namespace CodexUsageTray
             return saved;
         }
 
-        public int Import(IEnumerable<UsageSnapshot> snapshots)
+        public int Import(IEnumerable<UsageSnapshot> snapshots, bool incremental = false, bool completed = true)
         {
-            if (snapshots == null || ImportCompleted) return 0;
+            if (snapshots == null || (ImportCompleted && !incremental)) return 0;
             DateTime now = DateTime.UtcNow;
             SortedDictionary<DateTime, UsageHistorySample> merged = new SortedDictionary<DateTime, UsageHistorySample>();
             foreach (UsageHistorySample sample in samples) merged[sample.TimestampUtc] = sample;
@@ -136,29 +144,41 @@ namespace CodexUsageTray
             {
                 if (!IsValidSnapshot(snapshot) || snapshot.IsPaused || snapshot.IsRefreshing) continue;
                 DateTime timestamp = snapshot.LastUpdated.ToUniversalTime();
-                if (timestamp < now.AddDays(-14) || timestamp > now) continue;
+                if (timestamp < now.AddDays(-RetentionDays) || timestamp > now) continue;
                 UsageHistorySample existing;
                 if (!merged.TryGetValue(timestamp, out existing))
                 {
                     merged[timestamp] = new UsageHistorySample
                     {
                         TimestampUtc = timestamp,
-                        Weekly = FromLimit(snapshot.Weekly, timestamp),
-                        FiveHour = FromLimit(snapshot.FiveHour, timestamp)
+                        Weekly = FromLimit(snapshot.Weekly, timestamp, true),
+                        FiveHour = FromLimit(snapshot.FiveHour, timestamp, true)
                     };
                     added++;
                 }
                 else
                 {
                     // Live observations take precedence; imports can fill an absent window.
-                    if (existing.Weekly == null) existing.Weekly = FromLimit(snapshot.Weekly, timestamp);
-                    if (existing.FiveHour == null) existing.FiveHour = FromLimit(snapshot.FiveHour, timestamp);
+                    if (existing.Weekly == null && snapshot.Weekly != null)
+                    {
+                        existing.Weekly = FromLimit(snapshot.Weekly, timestamp, true);
+                        added++;
+                    }
+                    if (existing.FiveHour == null && snapshot.FiveHour != null)
+                    {
+                        existing.FiveHour = FromLimit(snapshot.FiveHour, timestamp, true);
+                        added++;
+                    }
                 }
             }
+            if (added == 0 && ImportCompleted) return 0;
             samples.Clear();
             samples.AddRange(merged.Values);
+            FilterImportedWindows(true);
+            FilterImportedWindows(false);
             Prune(now);
-            MarkImportCompleted(Save());
+            bool saved = Save();
+            if (completed) MarkImportCompleted(saved);
             return added;
         }
 
@@ -169,9 +189,44 @@ namespace CodexUsageTray
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
-                File.WriteAllText(path + ".imported", "1");
+                File.WriteAllText(path + ".imported", ImportVersion);
             }
             catch (Exception) { }
+        }
+
+        private void FilterImportedWindows(bool weekly)
+        {
+            List<UsageHistorySample> live = samples.FindAll(delegate(UsageHistorySample sample)
+            {
+                UsageHistoryWindow window = GetWindow(sample, weekly);
+                return window != null && !window.IsImported;
+            });
+            int nextLive = 0;
+            UsageHistorySample previous = null;
+            foreach (UsageHistorySample sample in samples)
+            {
+                UsageHistoryWindow window = GetWindow(sample, weekly);
+                if (window == null) continue;
+                while (nextLive < live.Count && live[nextLive].TimestampUtc < sample.TimestampUtc) nextLive++;
+                bool stale = false;
+                if (window.IsImported)
+                {
+                    // Logs can re-emit cached quota from an older API response. Such
+                    // a decrease must not create a reset or contradict a live reading.
+                    if (previous != null && HasMatchingReset(previous, sample, weekly) &&
+                        window.UsedPercent < GetWindow(previous, weekly).UsedPercent - 0.001) stale = true;
+                    if (nextLive < live.Count && HasMatchingReset(sample, live[nextLive], weekly) &&
+                        window.UsedPercent > GetWindow(live[nextLive], weekly).UsedPercent + 0.001) stale = true;
+                    if (previous != null && GetWindow(previous, weekly).ResetAtUtc.HasValue && window.ResetAtUtc.HasValue &&
+                        window.ResetAtUtc.Value < GetWindow(previous, weekly).ResetAtUtc.Value.AddMinutes(-2)) stale = true;
+                }
+                if (stale)
+                {
+                    if (weekly) sample.Weekly = null;
+                    else sample.FiveHour = null;
+                }
+                else previous = sample;
+            }
         }
 
         public static UsageHistoryWindow GetWindow(UsageHistorySample sample, bool weekly)
@@ -211,7 +266,8 @@ namespace CodexUsageTray
                 if (pattern != null && pattern.UsesValidatedModel)
                     return pattern.EndsAtReset ? "Will last until reset" : "\u2248" +
                         FormatDuration((pattern.EndUtc - pattern.StartUtc).TotalHours) +
-                        (pattern.UsesDailyPattern ? " left at usual daily pattern" :
+                        (pattern.UsesInactiveHours ? " left with usual inactive hours" :
+                            pattern.UsesDailyPattern ? " left at usual daily pattern" :
                             pattern.UsesSessionPace ? " left at recent session pace" : " left at recent daily pace");
             }
             List<UsageHistorySample> periodSamples = samples.FindAll(
@@ -241,8 +297,8 @@ namespace CodexUsageTray
             List<UsageHistorySample> periodSamples = samples.FindAll(
                 delegate(UsageHistorySample sample) { return GetWindow(sample, weekly) != null; });
             double ratePerHour;
-            if (!TryGetRecentRate(weekly, snapshot, periodSamples, out ratePerHour) &&
-                !TryGetCycleAverageRate(weekly, snapshot, periodSamples, out ratePerHour)) return null;
+            bool hasRate = TryGetRecentRate(weekly, snapshot, periodSamples, out ratePerHour) ||
+                TryGetCycleAverageRate(weekly, snapshot, periodSamples, out ratePerHour);
 
             double remaining = 100 - limit.UsedPercent;
             if (weekly && periodSamples.Count > 0)
@@ -255,6 +311,7 @@ namespace CodexUsageTray
                     if (pattern != null) return pattern.Project(startUtc, resetUtc, remaining);
                 }
             }
+            if (!hasRate) return null;
             double hoursUntilReset = (resetUtc - startUtc).TotalHours;
             bool endsAtReset = ratePerHour <= 0 || remaining / ratePerHour >= hoursUntilReset;
             DateTime endUtc = endsAtReset ? resetUtc : startUtc.AddHours(remaining / ratePerHour);
@@ -393,10 +450,20 @@ namespace CodexUsageTray
         private static string FormatDuration(double hours)
         {
             if (hours < 1.0 / 12) return "<5 minutes";
-            if (hours < 1) return (Math.Round(hours * 12) * 5).ToString("0", CultureInfo.InvariantCulture) + " minutes";
-            double value = hours < 24 ? Math.Round(hours * 2) / 2 : Math.Round(hours / 24, 1, MidpointRounding.AwayFromZero);
-            string unit = hours < 24 ? "hour" : "day";
-            return value.ToString("0.#", CultureInfo.InvariantCulture) + " " + unit + (value == 1 ? "" : "s");
+            double minutes = Math.Round(hours * 60, MidpointRounding.AwayFromZero);
+            double wholeHours = Math.Floor(minutes / 60);
+            double remainingMinutes = minutes % 60;
+            if (hours >= 24)
+            {
+                double days = Math.Round(hours / 24, 1, MidpointRounding.AwayFromZero);
+                return days.ToString("0.#", CultureInfo.InvariantCulture) + " day" + (days == 1 ? "" : "s") +
+                    " (" + wholeHours.ToString("0", CultureInfo.InvariantCulture) + "h " +
+                    remainingMinutes.ToString("0", CultureInfo.InvariantCulture) + "m)";
+            }
+            string hourText = wholeHours.ToString("0", CultureInfo.InvariantCulture) + " hour" + (wholeHours == 1 ? "" : "s");
+            string minuteText = remainingMinutes.ToString("0", CultureInfo.InvariantCulture) + " minute" + (remainingMinutes == 1 ? "" : "s");
+            if (wholeHours == 0) return minuteText;
+            return remainingMinutes == 0 ? hourText : hourText + " " + minuteText;
         }
 
         private static bool SameCycle(UsageHistorySample previous, UsageHistorySample current, bool weekly)
@@ -440,12 +507,13 @@ namespace CodexUsageTray
             return !double.IsNaN(value) && !double.IsInfinity(value) && value >= 0 && value <= 100;
         }
 
-        private static UsageHistoryWindow FromLimit(LimitWindow limit, DateTime timestamp)
+        private static UsageHistoryWindow FromLimit(LimitWindow limit, DateTime timestamp, bool imported = false)
         {
             if (limit == null) return null;
             return new UsageHistoryWindow
             {
                 UsedPercent = limit.UsedPercent,
+                IsImported = imported,
                 WindowMinutes = limit.WindowMinutes,
                 ResetAtUtc = limit.ResetAfterSeconds.HasValue
                     ? (DateTime?)timestamp.AddSeconds(limit.ResetAfterSeconds.Value) : null
@@ -454,18 +522,48 @@ namespace CodexUsageTray
 
         private void Prune(DateTime nowUtc)
         {
-            DateTime earliest = nowUtc.AddDays(-14);
+            DateTime earliest = nowUtc.AddDays(-RetentionDays);
             samples.RemoveAll(delegate(UsageHistorySample sample) { return sample.TimestampUtc < earliest; });
+            samples.RemoveAll(delegate(UsageHistorySample sample) { return sample.Weekly == null && sample.FiveHour == null; });
+            CoalesceSamples();
             if (samples.Count > MaxSamples) samples.RemoveRange(0, samples.Count - MaxSamples);
-            PruneCycle(true);
-            PruneCycle(false);
+            MarkCycleAdjustments(true);
+            MarkCycleAdjustments(false);
             samples.RemoveAll(delegate(UsageHistorySample sample) { return sample.Weekly == null && sample.FiveHour == null; });
             patternSampleCount = -1;
         }
 
-        private void PruneCycle(bool weekly)
+        private void CoalesceSamples()
         {
-            DateTime start = DateTime.MinValue;
+            int count = 0;
+            for (int i = 0; i < samples.Count; i++)
+            {
+                UsageHistorySample sample = samples[i];
+                if (count >= 3 && (sample.TimestampUtc - samples[count - 2].TimestampUtc).TotalHours <= 1 &&
+                    SameReading(samples[count - 3], samples[count - 2]) &&
+                    SameReading(samples[count - 2], samples[count - 1]) && SameReading(samples[count - 1], sample))
+                    samples[count - 1] = sample;
+                else samples[count++] = sample;
+            }
+            if (count < samples.Count) samples.RemoveRange(count, samples.Count - count);
+        }
+
+        private static bool SameReading(UsageHistorySample left, UsageHistorySample right)
+        {
+            return SameWindow(left.Weekly, right.Weekly) && SameWindow(left.FiveHour, right.FiveHour);
+        }
+
+        private static bool SameWindow(UsageHistoryWindow left, UsageHistoryWindow right)
+        {
+            if (left == null || right == null) return left == right;
+            return left.UsedPercent == right.UsedPercent && left.WindowMinutes == right.WindowMinutes &&
+                left.IsImported == right.IsImported && left.CycleAverageUnavailable == right.CycleAverageUnavailable &&
+                left.ResetAtUtc.HasValue == right.ResetAtUtc.HasValue && (!left.ResetAtUtc.HasValue ||
+                Math.Abs((left.ResetAtUtc.Value - right.ResetAtUtc.Value).TotalSeconds) <= 2);
+        }
+
+        private void MarkCycleAdjustments(bool weekly)
+        {
             UsageHistorySample previous = null;
             bool invalidAverage = false;
             foreach (UsageHistorySample sample in samples)
@@ -474,20 +572,12 @@ namespace CodexUsageTray
                 if (window == null) continue;
                 if (previous != null && IsReset(previous, sample, weekly))
                 {
-                    start = sample.TimestampUtc;
                     invalidAverage = HasMatchingReset(previous, sample, weekly) &&
                         window.UsedPercent < GetWindow(previous, weekly).UsedPercent - 0.001;
                 }
                 invalidAverage = invalidAverage || window.CycleAverageUnavailable;
                 window.CycleAverageUnavailable = invalidAverage;
                 previous = sample;
-            }
-            if (start == DateTime.MinValue) return;
-            foreach (UsageHistorySample sample in samples)
-            {
-                if (sample.TimestampUtc >= start) break;
-                if (weekly) sample.Weekly = null;
-                else sample.FiveHour = null;
             }
         }
 
@@ -518,8 +608,9 @@ namespace CodexUsageTray
                     samples.Add(sample);
                     previous = sample.TimestampUtc;
                 }
+                int beforePruning = samples.Count;
                 Prune(now);
-                Save(); // Persist cycle pruning when upgrading an existing history file.
+                if (samples.Count != beforePruning) Save();
                 return true;
             }
             catch (Exception)
@@ -550,8 +641,22 @@ namespace CodexUsageTray
                 if (Encoding.UTF8.GetByteCount(json) > MaxFileBytes) return false;
                 tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 File.WriteAllText(tempPath, json, new UTF8Encoding(false));
-                if (File.Exists(path)) File.Replace(tempPath, path, null, true);
-                else File.Move(tempPath, path);
+                for (int attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        if (File.Exists(path)) File.Replace(tempPath, path, null, true);
+                        else File.Move(tempPath, path);
+                        break;
+                    }
+                    catch (IOException)
+                    {
+                        // Windows can briefly lock the replaced file. Keep atomic
+                        // writes and allow two short retries before retaining memory only.
+                        if (attempt >= 2) throw;
+                        System.Threading.Thread.Sleep(25);
+                    }
+                }
                 return true;
             }
             catch (Exception)

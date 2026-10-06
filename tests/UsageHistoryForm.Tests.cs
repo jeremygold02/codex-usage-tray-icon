@@ -167,6 +167,13 @@ namespace CodexUsageTray.Tests
             chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
             Assert(detail.Text.Contains("Projected:") && detail.Text.Contains("80% remaining"),
                 "refreshing chart data retains an active forecast inspection");
+            chart.GetType().GetMethod("SelectProjection", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(chart, new object[] { now.AddMinutes(30) });
+            Assert(detail.Text.Contains("81% remaining") && detail.Text.Contains("19% used") &&
+                !detail.Text.Contains("80.5%") && !detail.Text.Contains("20% used"),
+                "projected percentages round to whole numbers once and remain complementary");
+            Assert(projection.Points[1].RemainingPercent == 80 && projection.EndUtc == now.AddHours(2),
+                "display rounding does not change the forecast path or depletion time");
         }
 
         private static void TestInspectionAndProjection(Control chart, UsageHistoryForm form, DateTime now)

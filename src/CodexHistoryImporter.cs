@@ -9,16 +9,27 @@ using System.Web.Script.Serialization;
 
 namespace CodexUsageTray
 {
-    internal static class CodexHistoryImporter
+    internal sealed class CodexHistoryImporter
     {
         private const int MaxLineBytes = 65536;
-        private const int MaxSamples = 45000;
-        private const long MaxScanBytes = 1024L * 1024 * 1024;
+        private const int MaxSamples = 180000;
+        private const long MaxScanBytes = 8L * 1024 * 1024 * 1024;
         private const int MaxScanMilliseconds = 30000;
         private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
         private static readonly byte[] TokenCountMarker = Encoding.ASCII.GetBytes("token_count");
         private static readonly byte[] RateLimitsMarker = Encoding.ASCII.GetBytes("rate_limits");
+        private sealed class FileCursor
+        {
+            public long Offset;
+            public long Length;
+            public DateTime ModifiedUtc;
+        }
+        private readonly Dictionary<string, FileCursor> cursors =
+            new Dictionary<string, FileCursor>(StringComparer.OrdinalIgnoreCase);
+
+        internal long LastScanBytes { get; private set; }
+        internal bool LastScanCompleted { get; private set; }
 
         internal static string DefaultCodexHome
         {
@@ -33,6 +44,14 @@ namespace CodexUsageTray
         internal static List<UsageSnapshot> ReadSnapshots(
             string codexHome, UsageSnapshot current, DateTime nowUtc, CancellationToken cancellation)
         {
+            return new CodexHistoryImporter().ReadUpdates(codexHome, current, nowUtc, cancellation);
+        }
+
+        internal List<UsageSnapshot> ReadUpdates(
+            string codexHome, UsageSnapshot current, DateTime nowUtc, CancellationToken cancellation)
+        {
+            LastScanBytes = 0;
+            LastScanCompleted = false;
             List<UsageSnapshot> result = new List<UsageSnapshot>();
             if (string.IsNullOrWhiteSpace(codexHome) || nowUtc.Kind != DateTimeKind.Utc ||
                 cancellation.IsCancellationRequested || !HasCurrentCycle(current, nowUtc))
@@ -41,7 +60,7 @@ namespace CodexUsageTray
             }
 
             Stopwatch clock = Stopwatch.StartNew();
-            DateTime earliest = nowUtc.AddDays(-14);
+            DateTime earliest = nowUtc.AddDays(-UsageHistoryStore.RetentionDays);
             List<FileInfo> files = FindRecentFiles(codexHome, earliest, clock, cancellation);
             files.Sort(delegate(FileInfo left, FileInfo right)
             {
@@ -50,11 +69,37 @@ namespace CodexUsageTray
 
             SortedDictionary<DateTime, UsageSnapshot> samples = new SortedDictionary<DateTime, UsageSnapshot>();
             long scannedBytes = 0;
+            int processed = 0;
             foreach (FileInfo file in files)
             {
                 if (ShouldStop(clock, cancellation) || scannedBytes >= MaxScanBytes) break;
-                ScanFile(file.FullName, current, nowUtc, clock, cancellation, samples, ref scannedBytes);
+                FileCursor cursor;
+                if (!cursors.TryGetValue(file.FullName, out cursor))
+                {
+                    cursor = new FileCursor();
+                    cursors.Add(file.FullName, cursor);
+                }
+                if (cursor.Length == file.Length && cursor.ModifiedUtc == file.LastWriteTimeUtc &&
+                    cursor.Offset == file.Length)
+                {
+                    processed++;
+                    continue;
+                }
+                if (file.Length < cursor.Length || (file.Length == cursor.Length &&
+                    cursor.ModifiedUtc != file.LastWriteTimeUtc)) cursor.Offset = 0;
+                cursor.Offset = ScanFile(file.FullName, cursor.Offset, current, nowUtc, clock,
+                    cancellation, samples, ref scannedBytes);
+                cursor.Length = file.Length;
+                cursor.ModifiedUtc = file.LastWriteTimeUtc;
+                processed++;
             }
+            // Offsets live only for recent logs; neither prompts nor log contents are cached.
+            HashSet<string> recentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (FileInfo file in files) recentPaths.Add(file.FullName);
+            foreach (string path in new List<string>(cursors.Keys))
+                if (!recentPaths.Contains(path)) cursors.Remove(path);
+            LastScanBytes = scannedBytes;
+            LastScanCompleted = processed == files.Count && !ShouldStop(clock, cancellation) && scannedBytes < MaxScanBytes;
             foreach (UsageSnapshot snapshot in samples.Values) result.Add(snapshot);
             return result;
         }
@@ -95,7 +140,7 @@ namespace CodexUsageTray
                 if (!timestampText.EndsWith("Z", StringComparison.OrdinalIgnoreCase) &&
                     !timestampText.EndsWith("+00:00", StringComparison.Ordinal)) return null;
                 DateTime eventUtc = timestamp.UtcDateTime;
-                if (eventUtc < nowUtc.AddDays(-14) || eventUtc > nowUtc ||
+                if (eventUtc < nowUtc.AddDays(-UsageHistoryStore.RetentionDays) || eventUtc > nowUtc ||
                     eventUtc > current.LastUpdated.ToUniversalTime()) return null;
 
                 DateTime? currentFiveReset = GetCurrentReset(current.FiveHour, 300, nowUtc, current.LastUpdated);
@@ -163,15 +208,17 @@ namespace CodexUsageTray
             return files;
         }
 
-        private static void ScanFile(string path, UsageSnapshot current, DateTime nowUtc,
+        private static long ScanFile(string path, long startOffset, UsageSnapshot current, DateTime nowUtc,
             Stopwatch clock, CancellationToken cancellation,
             SortedDictionary<DateTime, UsageSnapshot> samples, ref long scannedBytes)
         {
+            long completedOffset = startOffset;
             try
             {
                 using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read,
                     FileShare.ReadWrite | FileShare.Delete, 8192, FileOptions.SequentialScan))
                 {
+                    input.Seek(startOffset, SeekOrigin.Begin);
                     byte[] buffer = new byte[8192];
                     byte[] line = new byte[MaxLineBytes];
                     int lineLength = 0;
@@ -204,15 +251,19 @@ namespace CodexUsageTray
                                 lineLength = 0;
                                 oversized = false;
                                 offset = newline + 1;
+                                completedOffset = input.Position - read + offset;
                             }
                             else offset = read;
                         }
                     }
+                    // Parse a complete final JSON value even without a newline. Keep
+                    // its offset uncommitted so a partial append can be retried safely.
                     if (!oversized && lineLength > 0 && !ShouldStop(clock, cancellation))
                         AddLine(line, lineLength, current, nowUtc, samples);
                 }
             }
             catch (Exception) { }
+            return completedOffset;
         }
 
         private static void AddLine(byte[] line, int length, UsageSnapshot current,
@@ -276,7 +327,9 @@ namespace CodexUsageTray
             if (resetUtc <= eventUtc) return;
             DateTime? expected = minutes == 300 ? currentFiveReset :
                 minutes == 10080 ? currentWeekReset : null;
-            if (!expected.HasValue || Math.Abs((resetUtc - expected.Value).TotalSeconds) > 2) return;
+            // Retain earlier cycles for learning; the chart applies its own reset boundary.
+            // Exclude windows absent from the signed-in account and future reset cycles.
+            if (!expected.HasValue || resetUtc > expected.Value.AddSeconds(2)) return;
             double remaining = (resetUtc - eventUtc).TotalSeconds;
             if (remaining > minutes * 60 + 2) return;
             LimitWindow window = new LimitWindow

@@ -642,10 +642,11 @@ namespace CodexUsageTray
             {
                 selectedIndex = -1;
                 selectedProjectionUtc = timestamp;
-                double remaining = Math.Max(0, Math.Min(100, ProjectedRemaining(timestamp)));
+                double remaining = Math.Round(Math.Max(0, Math.Min(100, ProjectedRemaining(timestamp))),
+                    MidpointRounding.AwayFromZero);
                 SelectedDetail = "Projected: " + timestamp.ToLocalTime().ToString("G", CultureInfo.CurrentCulture) +
-                    Environment.NewLine + "\u2248" + remaining.ToString("0.#", CultureInfo.CurrentCulture) +
-                    "% remaining  |  \u2248" + (100 - remaining).ToString("0.#", CultureInfo.CurrentCulture) + "% used";
+                    Environment.NewLine + "\u2248" + remaining.ToString("0", CultureInfo.CurrentCulture) +
+                    "% remaining  |  \u2248" + (100 - remaining).ToString("0", CultureInfo.CurrentCulture) + "% used";
                 AccessibleDescription = SelectedDetail;
                 EventHandler handler = SelectionChanged;
                 if (handler != null) handler(this, EventArgs.Empty);

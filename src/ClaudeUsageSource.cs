@@ -88,13 +88,19 @@ namespace CodexUsageTray
                 temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 string json = new JavaScriptSerializer().Serialize(cache);
                 File.WriteAllText(temporaryPath, json, new UTF8Encoding(false));
-                if (File.Exists(path))
+                for (int attempt = 0; ; attempt++)
                 {
-                    File.Replace(temporaryPath, path, null);
-                }
-                else
-                {
-                    File.Move(temporaryPath, path);
+                    try
+                    {
+                        if (File.Exists(path)) File.Replace(temporaryPath, path, null);
+                        else File.Move(temporaryPath, path);
+                        break;
+                    }
+                    catch (IOException)
+                    {
+                        if (attempt >= 2) throw;
+                        System.Threading.Thread.Sleep(25);
+                    }
                 }
                 temporaryPath = null;
                 return true;

@@ -18,11 +18,13 @@ namespace CodexUsageTray.Tests
                 TestGapsAndResets(Path.Combine(directory, "cycles.json"));
                 TestWeeklyDepletion(Path.Combine(directory, "weekly.json"));
                 TestRecentPace(Path.Combine(directory, "recent.json"));
+                TestDurationFormatting(Path.Combine(directory, "duration.json"));
                 TestCorruptHistory(Path.Combine(directory, "corrupt.json"));
                 TestHistoryImport(Path.Combine(directory, "import.json"));
                 TestCycleAverage(Path.Combine(directory, "initial.json"));
                 TestImportSaveFailure(Path.Combine(directory, "unwritable.json"));
                 TestCycleRetention(Path.Combine(directory, "retention.json"));
+                TestImportConsistency(Path.Combine(directory, "import-consistency.json"));
                 UsageForecastEdgeCasesTests.Run();
             }
             finally
@@ -58,7 +60,7 @@ namespace CodexUsageTray.Tests
             Assert(!store.Observe(snapshot), "nonfinite observation rejected");
             snapshot.Weekly.UsedPercent = 101;
             Assert(!store.Observe(snapshot), "out-of-range observation rejected");
-            Assert(!store.Observe(Snapshot(now.AddDays(-15), 10, now)), "expired observation rejected");
+            Assert(!store.Observe(Snapshot(now.AddDays(-29), 10, now)), "expired observation rejected");
             Assert(!store.Observe(Snapshot(now.AddMinutes(5), 10, now.AddDays(3))), "future observation rejected");
             UsageSnapshot extreme = Snapshot(DateTime.MaxValue, 10, null);
             extreme.Weekly.ResetAfterSeconds = int.MaxValue;
@@ -215,7 +217,7 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddHours(-12), 30, reset));
             UsageSnapshot latest = Snapshot(now, 50, reset);
             store.Observe(latest);
-            Assert(store.GetForecast(true, latest, now) == "\u22481.3 days left at current pace", "weekly wall-clock rate bridges overnight observations in a known cycle");
+            Assert(store.GetForecast(true, latest, now) == "\u22481.3 days (30h 0m) left at current pace", "weekly wall-clock rate bridges overnight observations in a known cycle");
             List<UsageHistorySample> samples = store.Samples;
             Assert(!UsageHistoryStore.IsContinuous(samples[0], samples[1], true), "overnight chart gaps remain visible");
             Assert(!UsageHistoryStore.IsReset(samples[0], samples[1], true), "a chart gap is not a reset");
@@ -234,14 +236,14 @@ namespace CodexUsageTray.Tests
             latest = Snapshot(now, 20, reset);
             store.Observe(latest);
             samples = store.Samples;
-            Assert(UsageHistoryStore.IsReset(beforeReset, samples[0], false), "banked reset detected from a decrease");
-            Assert(!UsageHistoryStore.IsContinuous(beforeReset, samples[0], false), "chart does not connect across banked reset");
-            Assert(samples.Count == 2 && samples[0].FiveHour.UsedPercent == 10,
-                "completed cycles are removed from stored history");
+            Assert(UsageHistoryStore.IsReset(beforeReset, samples[1], false), "banked reset detected from a decrease");
+            Assert(!UsageHistoryStore.IsContinuous(beforeReset, samples[1], false), "chart does not connect across banked reset");
+            Assert(samples.Count == 3 && samples[1].FiveHour.UsedPercent == 10,
+                "earlier cycles remain available for pattern learning");
             Assert(store.GetForecast(false, latest, now) == "Learning usage pace...", "forecast cannot reuse consumption before reset");
-            samples[0].FiveHour.UsedPercent = 95;
-            samples[0].FiveHour.ResetAtUtc = reset.AddHours(5);
-            Assert(UsageHistoryStore.IsReset(beforeReset, samples[0], false), "changed reset deadline detects new cycle even when usage increased");
+            samples[1].FiveHour.UsedPercent = 95;
+            samples[1].FiveHour.ResetAtUtc = reset.AddHours(5);
+            Assert(UsageHistoryStore.IsReset(beforeReset, samples[1], false), "changed reset deadline detects new cycle even when usage increased");
         }
 
         private static void TestWeeklyDepletion(string path)
@@ -253,10 +255,10 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddHours(-12), 10, reset));
             UsageSnapshot latest = Snapshot(now, 20, reset);
             store.Observe(latest);
-            Assert(store.GetForecast(true, latest, now) == "\u22484 days left at current pace", "80 percent remaining at 20 percent per day lasts four more days");
+            Assert(store.GetForecast(true, latest, now) == "\u22484 days (96h 0m) left at current pace", "80 percent remaining at 20 percent per day lasts four days");
             Assert(store.GetForecast(true, latest, now.AddHours(1)) == "Refresh usage for an estimate", "stale observations cannot project depletion");
             latest.Weekly.ResetAfterSeconds = null;
-            Assert(store.GetForecast(true, latest, now) == "\u22484 days left at current pace", "depletion uses observed consumption rather than time until reset");
+            Assert(store.GetForecast(true, latest, now) == "\u22484 days (96h 0m) left at current pace", "depletion uses observed consumption rather than time until reset");
             latest.Weekly.ResetAfterSeconds = 2 * 86400;
             Assert(store.GetForecast(true, latest, now) == "Will last until reset", "weekly estimate is capped by its actual reset deadline");
             latest.Weekly.ResetAfterSeconds = 0;
@@ -275,7 +277,7 @@ namespace CodexUsageTray.Tests
             UsageProjection projection = store.GetProjection(true, latest, now);
             Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - 70.0 / 3) < 0.001,
                 "weekly acceleration favors recent consumption over the old 28-hour estimate");
-            Assert(store.GetForecast(true, latest, now) == "\u224823.5 hours left at current pace",
+            Assert(store.GetForecast(true, latest, now) == "\u224823 hours 20 minutes left at current pace",
                 "forecast text uses the same recent weighted rate as the projection");
 
             store.Clear();
@@ -316,6 +318,32 @@ namespace CodexUsageTray.Tests
                 "recent idle time slows consumption instead of being discarded");
         }
 
+        private static void TestDurationFormatting(string path)
+        {
+            DateTime now = DateTime.UtcNow.AddSeconds(-1);
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            foreach (double duration in new[] { 55.2, 55.35, 1.75 })
+            {
+                store.Clear();
+                bool weekly = duration >= 24;
+                double span = weekly ? 12 : 0.5;
+                double rate = 50 / duration;
+                DateTime reset = weekly ? now.AddDays(3) : now.AddHours(4);
+                store.Observe(Snapshot(now.AddHours(-span), 50 - rate * span, reset));
+                store.Observe(Snapshot(now.AddHours(-span / 2), 50 - rate * span / 2, reset));
+                UsageSnapshot latest = Snapshot(now, 50, reset);
+                store.Observe(latest);
+                string expected = duration == 55.2 ? "\u22482.3 days (55h 12m) left at current pace" :
+                    duration == 55.35 ? "\u22482.3 days (55h 21m) left at current pace" :
+                    "\u22481 hour 45 minutes left at current pace";
+                Assert(store.GetForecast(weekly, latest, now) == expected,
+                    "duration retains decimal days alongside hours and minutes from the full calculation");
+                UsageProjection projection = store.GetProjection(weekly, latest, now);
+                Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - duration) < 0.001,
+                    "duration formatting retains the precise projected depletion time");
+            }
+        }
+
         private static void TestCycleRetention(string path)
         {
             DateTime now = DateTime.UtcNow.AddSeconds(-1);
@@ -326,15 +354,15 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddHours(-4), 90, oldReset));
             store.Observe(Snapshot(now.AddHours(-2), 0, reset));
             store.Observe(Snapshot(now.AddHours(-1), 10, reset));
-            Assert(store.Samples.Count == 2 && store.Samples[0].TimestampUtc == now.AddHours(-2),
-                "only readings since the latest reset remain in memory");
+            Assert(store.Samples.Count == 4 && store.Samples[0].TimestampUtc == now.AddDays(-1),
+                "prior and current cycles remain in memory for learning");
             store = new UsageHistoryStore(path);
-            Assert(store.Samples.Count == 2 && !File.ReadAllText(path).Contains("UsedPercent\":90"),
-                "completed cycles are removed from the saved history file");
+            Assert(store.Samples.Count == 4 && File.ReadAllText(path).Contains("UsedPercent\":90"),
+                "prior cycles survive in the bounded saved history");
             UsageSnapshot latest = Snapshot(now, 10, reset);
             store.Observe(latest);
             store = new UsageHistoryStore(path);
-            Assert(store.Samples.Count == 3, "later idle readings preserve the current cycle after restart");
+            Assert(store.Samples.Count == 5, "later idle readings preserve both cycles after restart");
 
             store.Clear();
             store.Observe(Snapshot(now.AddHours(-2), 90, reset));
@@ -343,7 +371,12 @@ namespace CodexUsageTray.Tests
             latest = Snapshot(now, 15, reset);
             store.Observe(latest);
             Assert(store.GetForecast(true, latest, now) == "Learning usage pace...",
-                "pruning and restart preserve banked-reset evidence so a cycle average cannot reuse the old start");
+                "restart preserves banked-reset evidence so a cycle average cannot reuse the old start");
+            File.WriteAllText(path + ".imported", "1");
+            store = new UsageHistoryStore(path);
+            Assert(!store.ImportCompleted, "older import markers allow prior-cycle backfill after upgrading");
+            store.Import(new UsageSnapshot[0]);
+            Assert(new UsageHistoryStore(path).ImportCompleted, "updated import version persists");
         }
 
         private static void TestCorruptHistory(string path)
@@ -354,6 +387,40 @@ namespace CodexUsageTray.Tests
             DateTime now = DateTime.UtcNow.AddSeconds(-1);
             Assert(store.Observe(Snapshot(now, 10, now.AddDays(1))), "new observations recover corrupt history");
             Assert(new UsageHistoryStore(path).Samples.Count == 1, "recovered history persists");
+        }
+
+        private static void TestImportConsistency(string path)
+        {
+            DateTime now = DateTime.UtcNow.AddSeconds(-1);
+            DateTime reset = now.AddDays(3);
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            store.Observe(Snapshot(now.AddHours(-1), 20, reset));
+            UsageSnapshot current = Snapshot(now, 25, reset);
+            store.Observe(current);
+            store.Import(new[]
+            {
+                Snapshot(now.AddMinutes(-50), 19, reset),
+                Snapshot(now.AddMinutes(-45), 21, reset),
+                Snapshot(now.AddMinutes(-40), 20, reset),
+                Snapshot(now.AddMinutes(-30), 99, reset)
+            }, false, false);
+            Assert(store.Samples.Count == 3 && store.Samples[1].Weekly.UsedPercent == 21,
+                "cached lower quota and quota contradicting a live reading do not invent resets");
+            Assert(!store.ImportCompleted && !File.Exists(path + ".imported"),
+                "an interrupted import remains eligible to resume");
+            store.Import(new UsageSnapshot[0]);
+            store = new UsageHistoryStore(path);
+            Assert(store.ImportCompleted && store.Samples[1].Weekly.IsImported,
+                "import completion and provenance survive restart");
+            Assert(store.Import(new[] { Snapshot(now.AddMinutes(-20), 22, reset) }) == 0,
+                "completed backfill is not repeated");
+
+            store.Clear();
+            store.Observe(Snapshot(now.AddDays(-21), 10, now.AddDays(-16)));
+            store.Observe(Snapshot(now.AddDays(-7), 10, now.AddDays(-2)));
+            store.Observe(Snapshot(now, 10, reset));
+            Assert(new UsageHistoryStore(path).Samples.Count == 3,
+                "four-week learning retains readings older than two weeks");
         }
 
         private static void TestHistoryImport(string path)
@@ -374,7 +441,7 @@ namespace CodexUsageTray.Tests
             };
             Assert(store.Import(imported) == 3, "earlier observations are merged and duplicate live timestamp is preserved");
             Assert(store.Samples[3].Weekly.UsedPercent == 20, "import cannot replace a live reading");
-            Assert(store.GetForecast(true, current, now) == "\u22484 days left at current pace",
+            Assert(store.GetForecast(true, current, now) == "\u22484 days (96h 0m) left at current pace",
                 "backfilled data forecasts immediately across partial-window observations");
             UsageHistoryStore loaded = new UsageHistoryStore(path);
             Assert(loaded.ImportCompleted && loaded.Samples.Count == 4, "import and completion survive restart");
@@ -389,7 +456,7 @@ namespace CodexUsageTray.Tests
             DateTime now = DateTime.UtcNow.AddSeconds(-1);
             UsageHistoryStore store = new UsageHistoryStore(path);
             UsageSnapshot snapshot = Snapshot(now, 20, now.AddDays(6));
-            Assert(store.GetForecast(true, snapshot, now) == "\u22484 days left at cycle average",
+            Assert(store.GetForecast(true, snapshot, now) == "\u22484 days (96h 0m) left at cycle average",
                 "first reading of 20 percent in one day estimates four days without learning");
             snapshot.Weekly.UsedPercent = 10;
             Assert(store.GetForecast(true, snapshot, now) == "Will last until reset",

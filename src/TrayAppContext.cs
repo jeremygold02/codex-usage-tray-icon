@@ -81,6 +81,8 @@ namespace CodexUsageTray
         private bool claudeRequestInProgress;
         private readonly ClaudeQuotaClient claudeQuotaClient = new ClaudeQuotaClient();
         private bool historyImportStarted;
+        private DateTime nextHistoryScanUtc;
+        private readonly CodexHistoryImporter historyImporter = new CodexHistoryImporter();
         private System.Windows.Forms.Timer startupUiTimer;
 
         [DllImport("user32.dll")]
@@ -592,28 +594,27 @@ namespace CodexUsageTray
 
         private void ImportCodexHistory(UsageSnapshot snapshot)
         {
-            if (historyImportStarted || usageHistory.ImportCompleted) return;
+            if (historyImportStarted || usageHistory.ImportCompleted || DateTime.UtcNow < nextHistoryScanUtc) return;
             historyImportStarted = true;
+            nextHistoryScanUtc = DateTime.UtcNow.AddMinutes(5);
             UsageSnapshot initial = snapshot.Clone();
             CancellationToken cancellation = shutdownCancellation.Token;
             Task.Factory.StartNew(delegate
             {
-                return CodexHistoryImporter.ReadSnapshots(CodexHistoryImporter.DefaultCodexHome,
+                return historyImporter.ReadUpdates(CodexHistoryImporter.DefaultCodexHome,
                     initial, DateTime.UtcNow, cancellation);
             }, cancellation).ContinueWith(delegate(Task<List<UsageSnapshot>> task)
             {
                 if (task.IsFaulted)
                 {
                     task.Exception.Handle(delegate { return true; });
-                    return;
                 }
-                if (task.Status != TaskStatus.RanToCompletion) return;
                 TryPostToUi(delegate
                 {
-                    // Clearing history while the scan runs must not restore erased readings.
-                    if (shuttingDown || usageHistory.ImportCompleted) return;
-                    usageHistory.Import(task.Result);
-                    UpdateUsagePopup(currentSnapshot);
+                    historyImportStarted = false;
+                    if (shuttingDown || task.Status != TaskStatus.RanToCompletion) return;
+                    if (usageHistory.Import(task.Result, false, historyImporter.LastScanCompleted) > 0)
+                        UpdateUsagePopup(currentSnapshot);
                 });
             });
         }

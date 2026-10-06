@@ -3,8 +3,8 @@ using System.Collections.Generic;
 
 namespace CodexUsageTray
 {
-    // A daily seasonal mean, selected by rolling-origin validation against the
-    // existing pace forecast. Missing hours remain unknown, never assumed idle.
+    // Hourly patterns and recent pace candidates are compared on held-out readings.
+    // Missing hours remain unknown, never assumed idle.
     internal sealed class UsagePatternForecast
     {
         private sealed class Hour
@@ -19,9 +19,12 @@ namespace CodexUsageTray
         public double PatternError;
         public double DailyAverageError;
         public double SessionError;
+        public double InactiveHoursError;
         public bool IsValidated;
         public bool UsesDailyPattern;
         public bool UsesSessionPace;
+        public bool UsesInactiveHours;
+        public double? StartHourRate;
 
         public static UsagePatternForecast TryCreate(List<UsageHistorySample> samples, double currentRate)
         {
@@ -35,13 +38,24 @@ namespace CodexUsageTray
             UsageHistorySample latest = samples[samples.Count - 1];
             Dictionary<DateTime, Hour> hours = BuildHours(samples);
             double[] currentProfile = Profile(hours, latest.TimestampUtc, currentRate);
+            double[] currentInactiveProfile = InactiveProfile(hours, samples, currentRate);
+            double? currentStartRate = currentInactiveProfile != null && IsCurrentlyActive(samples)
+                ? (double?)RecentActiveRate(samples, currentRate) : null;
 
             double paceError = 0;
             double patternError = 0;
             double dailyError = 0;
             double sessionError = 0;
+            double inactiveError = 0;
             int count = 0;
-            DateTime nextOrigin = latest.TimestampUtc.AddDays(-3);
+            int inactiveCount = 0;
+            int patternCount = 0;
+            DateTime firstInactiveOrigin = DateTime.MinValue;
+            DateTime lastInactiveOrigin = DateTime.MinValue;
+            DateTime firstPatternOrigin = DateTime.MinValue;
+            DateTime lastPatternOrigin = DateTime.MinValue;
+            double validationWeight = 0;
+            DateTime nextOrigin = latest.TimestampUtc.AddDays(-7);
             DateTime firstOrigin = DateTime.MinValue;
             DateTime lastOrigin = DateTime.MinValue;
             for (int i = 0; i < samples.Count - 1; i++)
@@ -56,10 +70,14 @@ namespace CodexUsageTray
                     !UsageHistoryStore.TryGetCycleAverageRate(true, snapshot, training, out rate)) continue;
                 // Profile uses only completed hours before this origin; the held-out
                 // readings must not affect either candidate's training data.
-                double[] profile = Profile(BuildHours(training), origin.TimestampUtc, rate);
+                Dictionary<DateTime, Hour> trainingHours = BuildHours(training);
+                double[] profile = Profile(trainingHours, origin.TimestampUtc, rate);
                 double dailyRate = DailyRate(training, rate);
                 double sessionRate;
                 if (!UsageHistoryStore.TryGetSessionRate(snapshot, training, out sessionRate)) sessionRate = rate;
+                double[] inactiveProfile = InactiveProfile(trainingHours, training, sessionRate);
+                double? startRate = inactiveProfile != null && IsCurrentlyActive(training)
+                    ? (double?)RecentActiveRate(training, sessionRate) : null;
                 nextOrigin = origin.TimestampUtc.AddHours(3);
                 int target = i + 1;
                 foreach (int horizon in new[] { 1, 6, 24 })
@@ -82,26 +100,49 @@ namespace CodexUsageTray
                     if ((actual.TimestampUtc - deadline).TotalHours > (horizon == 1 ? 0.25 : 1) ||
                         actual.Weekly.UsedPercent >= 100) continue;
                     double elapsed = (actual.TimestampUtc - origin.TimestampUtc).TotalHours;
+                    double weight = Math.Pow(0.5, (latest.TimestampUtc - origin.TimestampUtc).TotalHours / 72);
                     double increase = Math.Max(0, actual.Weekly.UsedPercent - origin.Weekly.UsedPercent);
                     double allowance = 100 - origin.Weekly.UsedPercent;
                     // Normalize by the horizon so a 24-hour error cannot drown out
                     // the near-term forecasts used during an active session.
                     double baselineError = Math.Abs(Math.Min(allowance, rate * elapsed) - increase) / elapsed;
-                    paceError += baselineError;
-                    dailyError += Math.Abs(Math.Min(allowance, dailyRate * elapsed) - increase) / elapsed;
-                    sessionError += Math.Abs(Math.Min(allowance, sessionRate * elapsed) - increase) / elapsed;
-                    patternError += profile == null ? baselineError : Math.Abs(Math.Min(allowance,
-                        Consumption(profile, origin.TimestampUtc, actual.TimestampUtc)) - increase) / elapsed;
+                    paceError += baselineError * weight;
+                    dailyError += Math.Abs(Math.Min(allowance, dailyRate * elapsed) - increase) / elapsed * weight;
+                    double sessionForecastError = Math.Abs(Math.Min(allowance, sessionRate * elapsed) - increase) / elapsed;
+                    sessionError += sessionForecastError * weight;
+                    inactiveError += (inactiveProfile == null ? sessionForecastError : Math.Abs(Math.Min(allowance,
+                        Consumption(inactiveProfile, origin.TimestampUtc, actual.TimestampUtc, startRate)) - increase) / elapsed) * weight;
+                    patternError += (profile == null ? baselineError : Math.Abs(Math.Min(allowance,
+                        Consumption(profile, origin.TimestampUtc, actual.TimestampUtc)) - increase) / elapsed) * weight;
                     if (firstOrigin == DateTime.MinValue) firstOrigin = origin.TimestampUtc;
                     lastOrigin = origin.TimestampUtc;
                     count++;
+                    validationWeight += weight;
+                    if (inactiveProfile != null)
+                    {
+                        if (inactiveCount == 0) firstInactiveOrigin = origin.TimestampUtc;
+                        lastInactiveOrigin = origin.TimestampUtc;
+                        inactiveCount++;
+                    }
+                    if (profile != null)
+                    {
+                        if (patternCount == 0) firstPatternOrigin = origin.TimestampUtc;
+                        lastPatternOrigin = origin.TimestampUtc;
+                        patternCount++;
+                    }
                 }
             }
             // Require multiple evaluation days and a material improvement; a tie
             // keeps the simpler forecast. These are evidence gates, not usage rates.
-            bool usePattern = currentProfile != null && patternError < Math.Min(dailyError, sessionError);
-            bool useSession = !usePattern && sessionError < dailyError;
-            if (!usePattern)
+            bool patternReady = currentProfile != null && patternCount >= 8 &&
+                (lastPatternOrigin - firstPatternOrigin).TotalHours >= 24;
+            bool useInactive = currentInactiveProfile != null && inactiveCount >= 8 &&
+                (lastInactiveOrigin - firstInactiveOrigin).TotalHours >= 24 && inactiveError <= sessionError &&
+                inactiveError < dailyError && (!patternReady || inactiveError <= patternError);
+            bool usePattern = !useInactive && patternReady && patternError < Math.Min(dailyError, sessionError);
+            bool useSession = useInactive || (!usePattern && sessionError < dailyError);
+            if (useInactive) currentProfile = currentInactiveProfile;
+            else if (!usePattern)
             {
                 double rate = DailyRate(samples, currentRate);
                 if (useSession && !UsageHistoryStore.TryGetSessionRate(Snapshot(latest), samples, out rate))
@@ -112,14 +153,18 @@ namespace CodexUsageTray
             return new UsagePatternForecast
             {
                 Rates = currentProfile, ValidationCount = count,
-                PaceError = count == 0 ? 0 : paceError / count,
-                PatternError = count == 0 ? 0 : patternError / count,
-                DailyAverageError = count == 0 ? 0 : dailyError / count,
-                SessionError = count == 0 ? 0 : sessionError / count,
+                PaceError = count == 0 ? 0 : paceError / validationWeight,
+                PatternError = count == 0 ? 0 : patternError / validationWeight,
+                DailyAverageError = count == 0 ? 0 : dailyError / validationWeight,
+                SessionError = count == 0 ? 0 : sessionError / validationWeight,
+                InactiveHoursError = count == 0 ? 0 : inactiveError / validationWeight,
                 UsesDailyPattern = usePattern,
                 UsesSessionPace = useSession,
+                UsesInactiveHours = useInactive,
+                StartHourRate = useInactive ? currentStartRate : null,
                 IsValidated = count >= 8 && (lastOrigin - firstOrigin).TotalHours >= 24 &&
-                    paceError > 0.001 && (usePattern ? patternError : useSession ? sessionError : dailyError) < paceError * 0.9
+                    paceError > 0.001 && (useInactive ? inactiveError : usePattern ? patternError :
+                        useSession ? sessionError : dailyError) < paceError * 0.9
             };
         }
 
@@ -192,12 +237,13 @@ namespace CodexUsageTray
                 int days = 0;
                 DateTime sameHour = completed.Date.AddHours(clockHour);
                 if (sameHour >= completed) sameHour = sameHour.AddDays(-1);
-                for (int day = 0; day < 7; day++)
+                for (int day = 0; day < UsageHistoryStore.RetentionDays; day++)
                 {
                     Hour hour;
                     if (!hours.TryGetValue(sameHour.AddDays(-day), out hour) || hour.Coverage < 0.9) continue;
-                    usage += hour.Used;
-                    coverage += hour.Coverage;
+                    double weight = Math.Pow(0.5, day / 7.0);
+                    usage += hour.Used * weight;
+                    coverage += hour.Coverage * weight;
                     days++;
                 }
                 if (days >= 3)
@@ -230,14 +276,105 @@ namespace CodexUsageTray
             return rates;
         }
 
-        public static double Consumption(double[] rates, DateTime start, DateTime end)
+        private static double[] InactiveProfile(Dictionary<DateTime, Hour> hours,
+            List<UsageHistorySample> samples, double fallbackRate)
+        {
+            DateTime completed = FloorHour(samples[samples.Count - 1].TimestampUtc);
+            // Weekday and weekend routines are learned separately so a quiet
+            // weekend cannot turn a busy weekday morning into predicted sleep.
+            bool[] quiet = new bool[48];
+            List<DateTime> observedHours = new List<DateTime>(hours.Keys);
+            observedHours.Sort(delegate(DateTime left, DateTime right) { return right.CompareTo(left); });
+            for (int category = 0; category < 2; category++)
+            for (int clockHour = 0; clockHour < 24; clockHour++)
+            {
+                int days = 0;
+                bool inactive = true;
+                HashSet<DateTime> observedDates = new HashSet<DateTime>();
+                // Use the two most recent observed days, so a recent schedule
+                // change supersedes an older weekend or previous work routine.
+                foreach (DateTime time in observedHours)
+                {
+                    if (days == 2 || time < completed.AddDays(-UsageHistoryStore.RetentionDays)) break;
+                    DateTime local = time.ToLocalTime();
+                    Hour hour = hours[time];
+                    if (time >= completed || DayCategory(time) != category || local.Hour != clockHour ||
+                        hour.Coverage < 0.9 || !observedDates.Add(local.Date)) continue;
+                    days++;
+                    if (hour.Used > 0.001) inactive = false;
+                }
+                quiet[category * 24 + clockHour] = days == 2 && inactive;
+            }
+            bool[] sustained = new bool[48];
+            int quietCount = 0;
+            for (int category = 0; category < 2; category++)
+            for (int clockHour = 0; clockHour < 24; clockHour++)
+            {
+                // Only repeated, contiguous quiet periods count; one flat hour
+                // can simply be low consumption or percentage rounding.
+                int offset = category * 24;
+                bool inRun = (quiet[offset + (clockHour + 22) % 24] && quiet[offset + (clockHour + 23) % 24]) ||
+                    (quiet[offset + (clockHour + 23) % 24] && quiet[offset + (clockHour + 1) % 24]) ||
+                    (quiet[offset + (clockHour + 1) % 24] && quiet[offset + (clockHour + 2) % 24]);
+                sustained[offset + clockHour] = quiet[offset + clockHour] && inRun;
+                if (sustained[offset + clockHour]) quietCount++;
+            }
+            if (quietCount == 0 || quietCount == 48) return null;
+            double activeRate = RecentActiveRate(samples, fallbackRate);
+            double[] rates = new double[48];
+            for (int clockHour = 0; clockHour < 48; clockHour++)
+                rates[clockHour] = sustained[clockHour] ? 0 : activeRate;
+            return rates;
+        }
+
+        private static double RecentActiveRate(List<UsageHistorySample> samples, double fallbackRate)
+        {
+            double currentRate;
+            if (IsCurrentlyActive(samples) && UsageHistoryStore.TryGetSessionRate(
+                Snapshot(samples[samples.Count - 1]), samples, out currentRate)) return currentRate;
+            DateTime cutoff = samples[samples.Count - 1].TimestampUtc.AddDays(-7);
+            for (int i = samples.Count - 1; i > 0; i--)
+            {
+                UsageHistorySample before = samples[i - 1];
+                UsageHistorySample after = samples[i];
+                if (after.TimestampUtc < cutoff || before.Weekly.WindowMinutes != after.Weekly.WindowMinutes) break;
+                if (UsageHistoryStore.IsReset(before, after, true)) continue;
+                double elapsed = (after.TimestampUtc - before.TimestampUtc).TotalHours;
+                double increase = after.Weekly.UsedPercent - before.Weekly.UsedPercent;
+                if (elapsed <= 0 || elapsed > 2 || increase <= 0.001) continue;
+                List<UsageHistorySample> active = samples.GetRange(0, i + 1);
+                double rate;
+                return UsageHistoryStore.TryGetSessionRate(Snapshot(after), active, out rate)
+                    ? rate : fallbackRate;
+            }
+            return fallbackRate;
+        }
+
+        private static bool IsCurrentlyActive(List<UsageHistorySample> samples)
+        {
+            DateTime cutoff = samples[samples.Count - 1].TimestampUtc.AddHours(-1);
+            for (int i = samples.Count - 1; i > 0 && samples[i].TimestampUtc > cutoff; i--)
+            {
+                UsageHistorySample before = samples[i - 1];
+                UsageHistorySample after = samples[i];
+                if (UsageHistoryStore.IsReset(before, after, true) ||
+                    before.Weekly.WindowMinutes != after.Weekly.WindowMinutes) break;
+                if ((after.TimestampUtc - before.TimestampUtc).TotalHours <= 2 &&
+                    after.Weekly.UsedPercent > before.Weekly.UsedPercent + 0.001) return true;
+            }
+            return false;
+        }
+
+        public static double Consumption(double[] rates, DateTime start, DateTime end, double? startHourRate = null)
         {
             double used = 0;
+            DateTime firstHour = FloorHour(start);
             while (start < end)
             {
                 DateTime next = FloorHour(start).AddHours(1);
                 if (next > end) next = end;
-                used += rates[start.Hour] * (next - start).TotalHours;
+                double rate = startHourRate.HasValue && FloorHour(start) == firstHour ? startHourRate.Value : RateAt(rates, start);
+                used += rate * (next - start).TotalHours;
                 start = next;
             }
             return used;
@@ -249,7 +386,7 @@ namespace CodexUsageTray
             {
                 StartUtc = start, StartRemainingPercent = remaining,
                 Points = new List<UsageProjectionPoint>(), UsesDailyPattern = UsesDailyPattern,
-                UsesSessionPace = UsesSessionPace, UsesValidatedModel = true
+                UsesSessionPace = UsesSessionPace, UsesInactiveHours = UsesInactiveHours, UsesValidatedModel = true
             };
             projection.Points.Add(new UsageProjectionPoint { TimestampUtc = start, RemainingPercent = remaining });
             DateTime cursor = start;
@@ -257,7 +394,8 @@ namespace CodexUsageTray
             {
                 DateTime end = FloorHour(cursor).AddHours(1);
                 if (end > reset) end = reset;
-                double rate = Rates[cursor.Hour];
+                double rate = StartHourRate.HasValue && FloorHour(cursor) == FloorHour(start)
+                    ? StartHourRate.Value : RateAt(Rates, cursor);
                 double increase = rate * (end - cursor).TotalHours;
                 if (rate > 0 && increase >= remaining)
                 {
@@ -278,6 +416,17 @@ namespace CodexUsageTray
         private static DateTime FloorHour(DateTime value)
         {
             return new DateTime(value.Year, value.Month, value.Day, value.Hour, 0, 0, DateTimeKind.Utc);
+        }
+
+        private static int DayCategory(DateTime time)
+        {
+            DayOfWeek day = time.ToLocalTime().DayOfWeek;
+            return day == DayOfWeek.Saturday || day == DayOfWeek.Sunday ? 1 : 0;
+        }
+
+        private static double RateAt(double[] rates, DateTime time)
+        {
+            return rates.Length == 48 ? rates[time.ToLocalTime().Hour + DayCategory(time) * 24] : rates[time.Hour];
         }
 
         private static bool MatchingReset(UsageHistorySample before, UsageHistorySample after)
