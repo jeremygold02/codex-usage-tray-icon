@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Web.Script.Serialization;
 
 namespace CodexUsageTray.Tests
 {
@@ -25,6 +26,8 @@ namespace CodexUsageTray.Tests
                 TestImportSaveFailure(Path.Combine(directory, "unwritable.json"));
                 TestCycleRetention(Path.Combine(directory, "retention.json"));
                 TestImportConsistency(Path.Combine(directory, "import-consistency.json"));
+                TestImportCoverage(Path.Combine(directory, "import-coverage.json"));
+                TestImportCoverageAfterPolling(Path.Combine(directory, "import-polling.json"));
                 UsageForecastEdgeCasesTests.Run();
             }
             finally
@@ -389,6 +392,69 @@ namespace CodexUsageTray.Tests
             Assert(new UsageHistoryStore(path).Samples.Count == 1, "recovered history persists");
         }
 
+        private static void TestImportCoverage(string path)
+        {
+            DateTime now = DateTime.UtcNow.AddSeconds(-1);
+            DateTime reset = now.AddDays(3);
+            UsageSnapshot earlier = Snapshot(now.AddDays(-10), 40, now.AddDays(-4));
+            UsageSnapshot current = Snapshot(now, 20, reset);
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            store.Observe(current);
+            store.Import(new[] { earlier });
+            Assert(new UsageHistoryStore(path).ImportCompleted,
+                "an intact backfill stays complete across normal launches");
+
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            File.WriteAllText(path, serializer.Serialize(store.Samples.FindAll(
+                delegate(UsageHistorySample sample) { return sample.TimestampUtc >= now.AddDays(-7); })));
+            store = new UsageHistoryStore(path);
+            Assert(!store.ImportCompleted && store.Samples.Count == 1,
+                "a legacy app pruning prior cycles invalidates the retained coverage marker");
+            Assert(store.Import(new[] { earlier }) == 1 && new UsageHistoryStore(path).ImportCompleted,
+                "missing backfill can be repaired once and remains complete after restart");
+
+            List<UsageHistorySample> intact = store.Samples;
+            string intactJson = serializer.Serialize(intact);
+            intact[0].Weekly.IsImported = false;
+            intact[0].FiveHour.IsImported = false;
+            File.WriteAllText(path, serializer.Serialize(intact));
+            Assert(!new UsageHistoryStore(path).ImportCompleted,
+                "a live reading at the same timestamp cannot mask missing imported coverage");
+            File.WriteAllText(path, intactJson);
+
+            File.WriteAllText(path + ".imported", "2");
+            Assert(!new UsageHistoryStore(path).ImportCompleted,
+                "legacy completion flags without coverage allow one repair import");
+            File.WriteAllText(path + ".imported", serializer.Serialize(new
+            {
+                Version = "3", Coverage = new[]
+                {
+                    new { TimestampUtcTicks = now.AddDays(-29).Ticks, Weekly = true }
+                }
+            }));
+            Assert(new UsageHistoryStore(path).ImportCompleted,
+                "normal expiry beyond four weeks does not trigger another log scan");
+            File.WriteAllText(path + ".imported", serializer.Serialize(new
+            {
+                Version = "3", Coverage = new[]
+                {
+                    new { TimestampUtcTicks = now.AddDays(-29).Ticks, Weekly = true },
+                    new { TimestampUtcTicks = now.AddDays(-10).Ticks, Weekly = true }
+                }
+            }));
+            File.WriteAllText(path, serializer.Serialize(store.Samples.FindAll(
+                delegate(UsageHistorySample sample) { return sample.TimestampUtc >= now.AddDays(-7); })));
+            Assert(!new UsageHistoryStore(path).ImportCompleted,
+                "an expired first anchor cannot mask missing later imported days");
+            File.WriteAllText(path + ".imported", "{invalid completion");
+            Assert(!new UsageHistoryStore(path).ImportCompleted,
+                "an interrupted completion write allows recovery on restart");
+            store.Clear();
+            store = new UsageHistoryStore(path);
+            Assert(store.ImportCompleted && store.Samples.Count == 0 && store.Import(new[] { earlier }) == 0,
+                "an intentional clear retains completion without resurrecting history");
+        }
+
         private static void TestImportConsistency(string path)
         {
             DateTime now = DateTime.UtcNow.AddSeconds(-1);
@@ -421,6 +487,23 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now, 10, reset));
             Assert(new UsageHistoryStore(path).Samples.Count == 3,
                 "four-week learning retains readings older than two weeks");
+        }
+
+        private static void TestImportCoverageAfterPolling(string path)
+        {
+            DateTime now = DateTime.UtcNow.AddSeconds(-1);
+            DateTime reset = now.AddDays(3);
+            List<UsageSnapshot> imported = new List<UsageSnapshot>();
+            for (DateTime time = now.AddDays(-2); time <= now.AddDays(-1); time = time.AddMinutes(5))
+                imported.Add(Snapshot(time, 50, reset));
+            UsageHistoryStore store = new UsageHistoryStore(path);
+            store.Import(imported);
+            Assert(new UsageHistoryStore(path).ImportCompleted,
+                "compacted imported plateaus retain their daily coverage");
+            for (DateTime time = now.AddHours(-12); time <= now; time = time.AddMinutes(30))
+                store.Observe(Snapshot(time, 50, reset));
+            Assert(new UsageHistoryStore(path).ImportCompleted,
+                "later unchanged live polls cannot invalidate imported coverage or cause a rescan");
         }
 
         private static void TestHistoryImport(string path)

@@ -67,7 +67,21 @@ namespace CodexUsageTray
         private const int MaxSamples = 45000;
         internal const int RetentionDays = 28;
         private const int MaxFileBytes = 16 * 1024 * 1024;
-        private const string ImportVersion = "2";
+        private const string ImportVersion = "3";
+        private sealed class ImportCompletion
+        {
+            public string Version;
+            public List<ImportCoverageAnchor> Coverage;
+
+            public ImportCompletion() { }
+        }
+        private sealed class ImportCoverageAnchor
+        {
+            public long TimestampUtcTicks;
+            public bool Weekly;
+
+            public ImportCoverageAnchor() { }
+        }
         private readonly string path;
         private readonly List<UsageHistorySample> samples = new List<UsageHistorySample>();
         private UsagePatternForecast patternForecast;
@@ -82,7 +96,27 @@ namespace CodexUsageTray
             bool loaded = Load();
             if (loaded)
             {
-                try { ImportCompleted = File.ReadAllText(path + ".imported").Trim() == ImportVersion; }
+                try
+                {
+                    ImportCompletion completion = new JavaScriptSerializer().Deserialize<ImportCompletion>(
+                        File.ReadAllText(path + ".imported"));
+                    DateTime now = DateTime.UtcNow;
+                    ImportCompleted = completion != null && completion.Version == ImportVersion &&
+                        completion.Coverage != null && completion.Coverage.Count <= 2 * (RetentionDays + 1) &&
+                        completion.Coverage.TrueForAll(delegate(ImportCoverageAnchor anchor)
+                        {
+                            if (anchor == null || anchor.TimestampUtcTicks <= 0 || anchor.TimestampUtcTicks > now.Ticks)
+                                return false;
+                            if (anchor.TimestampUtcTicks < now.AddDays(-RetentionDays).Ticks || samples.Count == MaxSamples)
+                                return true;
+                            return samples.Exists(delegate(UsageHistorySample sample)
+                            {
+                                UsageHistoryWindow window = GetWindow(sample, anchor.Weekly);
+                                return Math.Abs(sample.TimestampUtc.Ticks - anchor.TimestampUtcTicks) <= TimeSpan.TicksPerMillisecond &&
+                                    window != null && window.IsImported;
+                            });
+                        });
+                }
                 catch (Exception) { }
             }
         }
@@ -189,7 +223,26 @@ namespace CodexUsageTray
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
-                File.WriteAllText(path + ".imported", ImportVersion);
+                // A completion flag alone can outlive history pruned by an older
+                // app. Remember each imported day so a later launch can
+                // repair missing backfill without rescanning an intact cache.
+                List<ImportCoverageAnchor> coverage = new List<ImportCoverageAnchor>();
+                foreach (bool weekly in new[] { true, false })
+                {
+                    HashSet<DateTime> days = new HashSet<DateTime>();
+                    foreach (UsageHistorySample sample in samples)
+                    {
+                        UsageHistoryWindow window = GetWindow(sample, weekly);
+                        if (window == null || !window.IsImported || !days.Add(sample.TimestampUtc.Date)) continue;
+                        coverage.Add(new ImportCoverageAnchor { TimestampUtcTicks = sample.TimestampUtc.Ticks, Weekly = weekly });
+                    }
+                }
+                ImportCompletion completion = new ImportCompletion
+                {
+                    Version = ImportVersion,
+                    Coverage = coverage
+                };
+                File.WriteAllText(path + ".imported", new JavaScriptSerializer().Serialize(completion));
             }
             catch (Exception) { }
         }
