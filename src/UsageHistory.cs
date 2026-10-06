@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -317,11 +316,8 @@ namespace CodexUsageTray
             {
                 UsageProjection pattern = GetProjection(true, snapshot, nowUtc);
                 if (pattern != null && pattern.UsesValidatedModel)
-                    return pattern.EndsAtReset ? "Will last until reset" : "\u2248" +
-                        FormatDuration((pattern.EndUtc - pattern.StartUtc).TotalHours) +
-                        (pattern.UsesInactiveHours ? " left with usual inactive hours" :
-                            pattern.UsesDailyPattern ? " left at usual daily pattern" :
-                            pattern.UsesSessionPace ? " left at recent session pace" : " left at recent daily pace");
+                    return pattern.EndsAtReset ? "Will last until reset" :
+                        FormatEstimate(pattern.StartUtc, (pattern.EndUtc - pattern.StartUtc).TotalHours);
             }
             List<UsageHistorySample> periodSamples = samples.FindAll(
                 delegate(UsageHistorySample sample) { return GetWindow(sample, weekly) != null; });
@@ -333,7 +329,7 @@ namespace CodexUsageTray
             if (window.ResetAtUtc.HasValue && remainingHours >=
                 (window.ResetAtUtc.Value - snapshot.LastUpdated.ToUniversalTime()).TotalHours)
                 return "Will last until reset";
-            return "\u2248" + FormatDuration(remainingHours) + " left at current pace";
+            return FormatEstimate(snapshot.LastUpdated.ToUniversalTime(), remainingHours);
         }
 
         public UsageProjection GetProjection(bool weekly, UsageSnapshot snapshot, DateTime nowUtc)
@@ -466,7 +462,7 @@ namespace CodexUsageTray
             DateTime reset = snapshot.LastUpdated.ToUniversalTime().AddSeconds(limit.ResetAfterSeconds.Value);
             if (remainingHours >= (reset - snapshot.LastUpdated.ToUniversalTime()).TotalHours)
                 return "Will last until reset";
-            return "\u2248" + FormatDuration(remainingHours) + " left at cycle average";
+            return FormatEstimate(snapshot.LastUpdated.ToUniversalTime(), remainingHours);
         }
 
         internal static bool TryGetCycleAverageRate(bool weekly, UsageSnapshot snapshot,
@@ -500,23 +496,14 @@ namespace CodexUsageTray
             return true;
         }
 
-        private static string FormatDuration(double hours)
+        private static string FormatEstimate(DateTime startUtc, double hours)
         {
-            if (hours < 1.0 / 12) return "<5 minutes";
-            double minutes = Math.Round(hours * 60, MidpointRounding.AwayFromZero);
-            double wholeHours = Math.Floor(minutes / 60);
-            double remainingMinutes = minutes % 60;
-            if (hours >= 24)
-            {
-                double days = Math.Round(hours / 24, 1, MidpointRounding.AwayFromZero);
-                return days.ToString("0.#", CultureInfo.InvariantCulture) + " day" + (days == 1 ? "" : "s") +
-                    " (" + wholeHours.ToString("0", CultureInfo.InvariantCulture) + "h " +
-                    remainingMinutes.ToString("0", CultureInfo.InvariantCulture) + "m)";
-            }
-            string hourText = wholeHours.ToString("0", CultureInfo.InvariantCulture) + " hour" + (wholeHours == 1 ? "" : "s");
-            string minuteText = remainingMinutes.ToString("0", CultureInfo.InvariantCulture) + " minute" + (remainingMinutes == 1 ? "" : "s");
-            if (wholeHours == 0) return minuteText;
-            return remainingMinutes == 0 ? hourText : hourText + " " + minuteText;
+            double seconds = hours * 3600;
+            if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0 || seconds > int.MaxValue ||
+                seconds > (DateTime.MaxValue - startUtc).TotalSeconds) return "Usage estimate unavailable";
+            int durationSeconds = (int)Math.Round(seconds, MidpointRounding.AwayFromZero);
+            return "Estimated: " + TimeFormatter.FormatDateTime(startUtc.AddHours(hours).ToLocalTime()) +
+                " (" + TimeFormatter.FormatDuration(durationSeconds) + ")";
         }
 
         private static bool SameCycle(UsageHistorySample previous, UsageHistorySample current, bool weekly)

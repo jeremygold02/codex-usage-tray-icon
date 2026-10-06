@@ -92,7 +92,7 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddMinutes(-30), 25, reset));
             store.Observe(Snapshot(now.AddMinutes(-15), 37.5, reset));
             store.Observe(latest);
-            Assert(store.GetForecast(false, latest, now) == "\u22481 hour left at current pace", "observed 50 percent per hour forecasts one hour");
+            Assert(store.GetForecast(false, latest, now) == ExpectedEstimate(now, 3600, "1h 0m"), "observed 50 percent per hour forecasts one hour");
             Assert(store.GetForecast(true, latest, now) == "Will last until reset", "cycle average is capped by the reset");
             Assert(store.GetForecast(false, latest, now.AddMinutes(31)) == "Refresh usage for an estimate", "old observations do not yield forecasts");
 
@@ -106,7 +106,7 @@ namespace CodexUsageTray.Tests
             latest.FiveHour.ResetAfterSeconds = 3600;
             Assert(store.GetForecast(false, latest, now) == "Will last until reset", "depletion exactly at reset lasts until reset");
             latest.FiveHour.ResetAfterSeconds = 3601;
-            Assert(store.GetForecast(false, latest, now) == "\u22481 hour left at current pace", "depletion before reset retains its duration");
+            Assert(store.GetForecast(false, latest, now) == ExpectedEstimate(now, 3600, "1h 0m"), "depletion before reset retains its duration");
 
             store.Clear();
             reset = now.AddHours(4);
@@ -149,7 +149,7 @@ namespace CodexUsageTray.Tests
             latest.FiveHour.ResetAfterSeconds = 3601;
             projection = store.GetProjection(false, latest, queriedAt);
             Assert(projection != null && projection.EndUtc == reading.AddHours(1) && !projection.EndsAtReset &&
-                store.GetForecast(false, latest, queriedAt) == "\u22481 hour left at current pace",
+                store.GetForecast(false, latest, queriedAt) == ExpectedEstimate(reading, 3600, "1h 0m"),
                 "forecast and projection agree for a fresh reading taken before the query");
 
             store.Clear();
@@ -220,7 +220,7 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddHours(-12), 30, reset));
             UsageSnapshot latest = Snapshot(now, 50, reset);
             store.Observe(latest);
-            Assert(store.GetForecast(true, latest, now) == "\u22481.3 days (30h 0m) left at current pace", "weekly wall-clock rate bridges overnight observations in a known cycle");
+            Assert(store.GetForecast(true, latest, now) == ExpectedEstimate(now, 30 * 3600, "1d 6h"), "weekly wall-clock rate bridges overnight observations in a known cycle");
             List<UsageHistorySample> samples = store.Samples;
             Assert(!UsageHistoryStore.IsContinuous(samples[0], samples[1], true), "overnight chart gaps remain visible");
             Assert(!UsageHistoryStore.IsReset(samples[0], samples[1], true), "a chart gap is not a reset");
@@ -258,10 +258,10 @@ namespace CodexUsageTray.Tests
             store.Observe(Snapshot(now.AddHours(-12), 10, reset));
             UsageSnapshot latest = Snapshot(now, 20, reset);
             store.Observe(latest);
-            Assert(store.GetForecast(true, latest, now) == "\u22484 days (96h 0m) left at current pace", "80 percent remaining at 20 percent per day lasts four days");
+            Assert(store.GetForecast(true, latest, now) == ExpectedEstimate(now, 4 * 86400, "4d 0h"), "80 percent remaining at 20 percent per day lasts four days");
             Assert(store.GetForecast(true, latest, now.AddHours(1)) == "Refresh usage for an estimate", "stale observations cannot project depletion");
             latest.Weekly.ResetAfterSeconds = null;
-            Assert(store.GetForecast(true, latest, now) == "\u22484 days (96h 0m) left at current pace", "depletion uses observed consumption rather than time until reset");
+            Assert(store.GetForecast(true, latest, now) == ExpectedEstimate(now, 4 * 86400, "4d 0h"), "depletion uses observed consumption rather than time until reset");
             latest.Weekly.ResetAfterSeconds = 2 * 86400;
             Assert(store.GetForecast(true, latest, now) == "Will last until reset", "weekly estimate is capped by its actual reset deadline");
             latest.Weekly.ResetAfterSeconds = 0;
@@ -280,7 +280,7 @@ namespace CodexUsageTray.Tests
             UsageProjection projection = store.GetProjection(true, latest, now);
             Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - 70.0 / 3) < 0.001,
                 "weekly acceleration favors recent consumption over the old 28-hour estimate");
-            Assert(store.GetForecast(true, latest, now) == "\u224823 hours 20 minutes left at current pace",
+            Assert(store.GetForecast(true, latest, now) == ExpectedEstimate(now, 84000, "23h 20m"),
                 "forecast text uses the same recent weighted rate as the projection");
 
             store.Clear();
@@ -336,11 +336,9 @@ namespace CodexUsageTray.Tests
                 store.Observe(Snapshot(now.AddHours(-span / 2), 50 - rate * span / 2, reset));
                 UsageSnapshot latest = Snapshot(now, 50, reset);
                 store.Observe(latest);
-                string expected = duration == 55.2 ? "\u22482.3 days (55h 12m) left at current pace" :
-                    duration == 55.35 ? "\u22482.3 days (55h 21m) left at current pace" :
-                    "\u22481 hour 45 minutes left at current pace";
+                string expected = ExpectedEstimate(now, (int)Math.Round(duration * 3600), weekly ? "2d 7h" : "1h 45m");
                 Assert(store.GetForecast(weekly, latest, now) == expected,
-                    "duration retains decimal days alongside hours and minutes from the full calculation");
+                    "estimates match the reset's local date/time and bracketed duration format");
                 UsageProjection projection = store.GetProjection(weekly, latest, now);
                 Assert(projection != null && Math.Abs((projection.EndUtc - now).TotalHours - duration) < 0.001,
                     "duration formatting retains the precise projected depletion time");
@@ -524,7 +522,7 @@ namespace CodexUsageTray.Tests
             };
             Assert(store.Import(imported) == 3, "earlier observations are merged and duplicate live timestamp is preserved");
             Assert(store.Samples[3].Weekly.UsedPercent == 20, "import cannot replace a live reading");
-            Assert(store.GetForecast(true, current, now) == "\u22484 days (96h 0m) left at current pace",
+            Assert(store.GetForecast(true, current, now) == ExpectedEstimate(now, 4 * 86400, "4d 0h"),
                 "backfilled data forecasts immediately across partial-window observations");
             UsageHistoryStore loaded = new UsageHistoryStore(path);
             Assert(loaded.ImportCompleted && loaded.Samples.Count == 4, "import and completion survive restart");
@@ -539,7 +537,7 @@ namespace CodexUsageTray.Tests
             DateTime now = DateTime.UtcNow.AddSeconds(-1);
             UsageHistoryStore store = new UsageHistoryStore(path);
             UsageSnapshot snapshot = Snapshot(now, 20, now.AddDays(6));
-            Assert(store.GetForecast(true, snapshot, now) == "\u22484 days (96h 0m) left at cycle average",
+            Assert(store.GetForecast(true, snapshot, now) == ExpectedEstimate(now, 4 * 86400, "4d 0h"),
                 "first reading of 20 percent in one day estimates four days without learning");
             snapshot.Weekly.UsedPercent = 10;
             Assert(store.GetForecast(true, snapshot, now) == "Will last until reset",
@@ -586,6 +584,11 @@ namespace CodexUsageTray.Tests
                 Weekly = new LimitWindow { UsedPercent = used, WindowMinutes = 10080, ResetAfterSeconds = seconds },
                 FiveHour = new LimitWindow { UsedPercent = used, WindowMinutes = 300, ResetAfterSeconds = seconds }
             };
+        }
+
+        internal static string ExpectedEstimate(DateTime reading, int seconds, string duration)
+        {
+            return "Estimated: " + TimeFormatter.FormatResetDateTime(reading.ToLocalTime(), seconds) + " (" + duration + ")";
         }
 
         private static void Assert(bool condition, string message)

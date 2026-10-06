@@ -47,7 +47,8 @@ namespace CodexUsageTray.Tests
                     List<UsageHistorySample> samples = store.Samples;
                     Assert(!UsageHistoryStore.IsReset(samples[0], samples[1], weekly),
                         "a decline within the reset tolerance is not a reset");
-                    string expected = weekly ? "\u22484 days (96h 0m) left at cycle average" : "\u22483 hours left at cycle average";
+                    string expected = UsageHistoryTests.ExpectedEstimate(now, weekly ? 4 * 86400 : 3 * 3600,
+                        weekly ? "4d 0h" : "3h 0m");
                     Assert(store.GetForecast(weekly, latest, now) == expected,
                         "sub-tolerance declines must preserve the cycle-average forecast for " + (weekly ? "weekly" : "five-hour"));
                     UsageProjection projection = store.GetProjection(weekly, latest, now);
@@ -94,7 +95,7 @@ namespace CodexUsageTray.Tests
                         Math.Abs((projection.EndUtc - now).TotalHours - expectedHours) < 0.001,
                         "weighted pace uses only observations after a banked or scheduled reset");
                     Assert(store.GetForecast(weekly, latest, now) ==
-                        (weekly ? "\u224820 hours left at current pace" : "\u22481 hour 45 minutes left at current pace"),
+                        UsageHistoryTests.ExpectedEstimate(now, weekly ? 20 * 3600 : 105 * 60, weekly ? "20h 0m" : "1h 45m"),
                         "forecast text and projection agree after the reset");
                 }
             }
@@ -143,7 +144,7 @@ namespace CodexUsageTray.Tests
                     if (sufficient)
                     {
                         UsageProjection projection = store.GetProjection(weekly, latest, now);
-                        Assert(forecast.EndsWith("left at current pace") && projection != null &&
+                        Assert(forecast.StartsWith("Estimated: ") && projection != null &&
                             Math.Abs((projection.EndUtc - now).TotalHours - 88 * spanHours / 12) < 0.001,
                             "the exact minimum span enables recent weighted pace");
                     }
@@ -200,7 +201,7 @@ namespace CodexUsageTray.Tests
             {
                 form.UpdateData(latest);
                 Label forecast = (Label)typeof(UsageHistoryForm).GetField("forecastLabel", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
-                Assert(forecast.Text == "\u22484 days (96h 0m) left at cycle average", "chart footer retains its estimate after harmless jitter");
+                Assert(forecast.Text == UsageHistoryTests.ExpectedEstimate(now, 4 * 86400, "4d 0h"), "chart footer retains its estimate after harmless jitter");
                 Control chart = (Control)typeof(UsageHistoryForm).GetField("chart", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
                 UsageProjection projection = (UsageProjection)chart.GetType().GetField("projection", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
                 Assert(projection != null && projection.StartUtc == now && projection.EndUtc == now.AddDays(4),

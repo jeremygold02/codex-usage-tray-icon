@@ -42,11 +42,14 @@ namespace CodexUsageTray.Tests
             Assert(shortModel == null || !shortModel.UsesDailyPattern,
                 "two days of observations do not establish a recurring pattern");
 
-            TestStoreAgreement(Pattern(latestTime, 6, false), latestTime);
+            TestStoreAgreement(Pattern(latestTime, 6, false), latestTime, false);
+            List<UsageHistorySample> faster = Pattern(latestTime, 6, false);
+            foreach (UsageHistorySample sample in faster) sample.Weekly.UsedPercent *= 1.9;
+            TestStoreAgreement(faster, latestTime, true);
             TestInactiveRoutine();
         }
 
-        private static void TestStoreAgreement(List<UsageHistorySample> samples, DateTime latestTime)
+        private static void TestStoreAgreement(List<UsageHistorySample> samples, DateTime latestTime, bool depletes)
         {
             string path = Path.Combine(Path.GetTempPath(), "UsagePatternTest-" + Guid.NewGuid().ToString("N") + ".json");
             try
@@ -59,8 +62,18 @@ namespace CodexUsageTray.Tests
                 UsageProjection projection = store.GetProjection(true, latest, latestTime);
                 Assert(projection != null && projection.UsesDailyPattern && projection.Points.Count > 2,
                     "store returns a validated path instead of an artificial curved trend");
-                Assert(store.GetForecast(true, latest, latestTime) == "Will last until reset",
-                    "forecast text and seasonal path agree about lasting through reset");
+                if (depletes)
+                {
+                    DateTime expectedEnd = latestTime.Date.AddDays(1).AddHours(8 + (100 - 48 * 1.9) / 1.9);
+                    Assert(!projection.EndsAtReset && Math.Abs((projection.EndUtc - expectedEnd).TotalSeconds) < 0.001,
+                        "the seasonal depletion estimate retains the calculated endpoint");
+                    Assert(store.GetForecast(true, latest, latestTime) == UsageHistoryTests.ExpectedEstimate(latestTime,
+                        (int)Math.Round((expectedEnd - latestTime).TotalSeconds), "20h 37m"),
+                        "validated patterns use the same estimated date and duration format as recent pace");
+                }
+                else
+                    Assert(store.GetForecast(true, latest, latestTime) == "Will last until reset",
+                        "forecast text and seasonal path agree about lasting through reset");
                 Assert(store.GetProjection(true, latest, latestTime.AddMinutes(31)) == null,
                     "stale snapshots still suppress the seasonal forecast");
                 store.Clear();
