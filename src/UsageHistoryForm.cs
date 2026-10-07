@@ -293,7 +293,7 @@ namespace CodexUsageTray
                 for (int i = samples.Count - 2; i > 0; i--)
                     if (!IsChangedReading(i) && !IsChangedReading(i + 1)) samples.RemoveAt(i);
                 if (samples.Count > 0) startUtc = samples[0].TimestampUtc;
-                if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
+                UpdateEndUtc();
                 int retainedIndex = -1;
                 if (selectedTimestamp.HasValue)
                 {
@@ -325,16 +325,28 @@ namespace CodexUsageTray
                         value.EndUtc > value.StartUtc)
                         projection = value;
                 }
-                endUtc = projection != null && projection.EndUtc > observedEndUtc ? projection.EndUtc : observedEndUtc;
-                if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
+                UpdateEndUtc();
                 if (selectedProjectionUtc.HasValue)
                 {
                     DateTime timestamp = selectedProjectionUtc.Value;
-                    if (projection != null && timestamp >= projection.StartUtc && timestamp <= projection.EndUtc)
+                    if (projection != null && timestamp >= projection.StartUtc && timestamp <= endUtc)
                         SelectProjection(timestamp);
                     else SelectSample(-1);
                 }
                 Invalidate();
+            }
+
+            private void UpdateEndUtc()
+            {
+                endUtc = observedEndUtc;
+                if (samples.Count > 0)
+                {
+                    UsageHistoryWindow window = UsageHistoryStore.GetWindow(samples[samples.Count - 1], weekly);
+                    if (window.ResetAtUtc.HasValue && window.ResetAtUtc.Value > endUtc)
+                        endUtc = window.ResetAtUtc.Value;
+                }
+                if (projection != null && projection.EndUtc > endUtc) endUtc = projection.EndUtc;
+                if (endUtc <= startUtc) endUtc = startUtc.AddMinutes(1);
             }
 
             public void ApplyTheme(bool isDark)
@@ -379,19 +391,41 @@ namespace CodexUsageTray
                         DrawText(graphics, percent.ToString(CultureInfo.CurrentCulture) + "%",
                             new RectangleF(0, y - labelHeight / 2, plot.Left - 6 * scale, labelHeight), muted, true);
                     }
-                    for (int tick = 0; samples.Count > 0 && tick <= 4; tick++)
+                    if (samples.Count > 0)
                     {
-                        float x = plot.Left + plot.Width * tick / 4.0f;
-                        graphics.DrawLine(gridPen, x, plot.Bottom, x, plot.Bottom + 4 * scale);
-                        DateTime time = startUtc + TimeSpan.FromTicks((endUtc - startUtc).Ticks * tick / 4);
-                        DateTime local = time.ToLocalTime();
-                        string label = local.ToString(showDates ? "MMM d" : "t", CultureInfo.CurrentCulture);
-                        float width = Math.Min(88 * scale, plot.Width / 4);
-                        float left = Math.Max(plot.Left, Math.Min(plot.Right - width, x - width / 2));
-                        DrawText(graphics, label, new RectangleF(left, plot.Bottom + 6 * scale, width, labelHeight), muted, false);
-                        if (showDates)
-                            DrawText(graphics, local.ToString("t", CultureInfo.CurrentCulture),
-                                new RectangleF(left, plot.Bottom + 6 * scale + labelHeight, width, labelHeight), muted, false);
+                        float width = Math.Max(AxisLabelWidth(graphics, startUtc, showDates),
+                            AxisLabelWidth(graphics, endUtc, showDates));
+                        width = Math.Max(width, TextRenderer.MeasureText(graphics, "11:59 PM", Font,
+                            Size.Empty, TextFormatFlags.NoPadding).Width) + 4 * scale;
+                        List<DateTime> ticks = GetAxisTicks(width + 16 * scale);
+                        float previousRight = plot.Left - 12 * scale;
+                        float lastLeft = plot.Right - AxisLabelWidth(graphics, endUtc, showDates) - 4 * scale;
+                        for (int i = 0; i < ticks.Count; i++)
+                        {
+                            float x = GetChartPoint(ticks[i], 0).X;
+                            float labelWidth = AxisLabelWidth(graphics, ticks[i], showDates) + 4 * scale;
+                            bool first = i == 0;
+                            bool last = i == ticks.Count - 1;
+                            float left = first ? plot.Left : last ? plot.Right - labelWidth : x - labelWidth / 2;
+                            if (!first && !last && (left < previousRight + 12 * scale ||
+                                left + labelWidth > lastLeft - 12 * scale)) continue;
+                            graphics.DrawLine(gridPen, x, plot.Bottom, x, plot.Bottom + 4 * scale);
+                            DateTime local = ticks[i].ToLocalTime();
+                            Rectangle bounds = Rectangle.Round(new RectangleF(left, plot.Bottom + 6 * scale,
+                                labelWidth, labelHeight));
+                            TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix |
+                                TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter |
+                                (first ? TextFormatFlags.Left : last ? TextFormatFlags.Right : TextFormatFlags.HorizontalCenter);
+                            TextRenderer.DrawText(graphics, local.ToString(showDates ? "MMM d" : "t",
+                                CultureInfo.CurrentCulture), Font, bounds, muted, flags);
+                            if (showDates)
+                            {
+                                bounds.Y += (int)Math.Ceiling(labelHeight);
+                                TextRenderer.DrawText(graphics, local.ToString("t", CultureInfo.CurrentCulture),
+                                    Font, bounds, muted, flags);
+                            }
+                            previousRight = left + labelWidth;
+                        }
                     }
                 }
 
@@ -413,6 +447,8 @@ namespace CodexUsageTray
                             }
                         }
                         else graphics.DrawLine(projectionPen, projectedStart, projectedEnd);
+                        if (projection.EndRemainingPercent <= 0 && endUtc > projection.EndUtc)
+                            graphics.DrawLine(projectionPen, projectedEnd, GetChartPoint(endUtc, 0));
                         projectionPen.DashStyle = DashStyle.Solid;
                         graphics.DrawEllipse(projectionPen, projectedEnd.X - 3 * scale, projectedEnd.Y - 3 * scale, 6 * scale, 6 * scale);
                         if (selectedProjectionUtc.HasValue)
@@ -493,7 +529,6 @@ namespace CodexUsageTray
                 {
                     double fraction = Math.Max(0, Math.Min(1, (e.X - plot.Left) / plot.Width));
                     DateTime timestamp = startUtc.AddSeconds((endUtc - startUtc).TotalSeconds * fraction);
-                    if (timestamp > projection.EndUtc) timestamp = projection.EndUtc;
                     SelectProjection(timestamp);
                     return;
                 }
@@ -620,6 +655,7 @@ namespace CodexUsageTray
 
             private double ProjectedRemaining(DateTime timestamp)
             {
+                if (timestamp >= projection.EndUtc) return projection.EndRemainingPercent;
                 DateTime before = projection.StartUtc;
                 double remaining = projection.StartRemainingPercent;
                 if (projection.Points != null)
@@ -656,6 +692,44 @@ namespace CodexUsageTray
             private PointF GetPoint(UsageHistorySample sample, UsageHistoryWindow window)
             {
                 return GetChartPoint(sample.TimestampUtc, 100 - window.UsedPercent);
+            }
+
+            private List<DateTime> GetAxisTicks(float minimumSpacing)
+            {
+                List<DateTime> ticks = new List<DateTime> { startUtc };
+                int intervals = Math.Max(1, Math.Min(8, (int)(plot.Width / minimumSpacing)));
+                double targetMinutes = (endUtc - startUtc).TotalMinutes / intervals;
+                int[] steps = { 1, 5, 15, 30, 60, 180, 360, 720, 1440, 2880, 10080, 20160, 40320 };
+                int stepMinutes = steps[steps.Length - 1];
+                foreach (int step in steps)
+                {
+                    if (step >= targetMinutes) { stepMinutes = step; break; }
+                }
+                long stepTicks = TimeSpan.FromMinutes(stepMinutes).Ticks;
+                DateTime local = startUtc.ToLocalTime();
+                long nextTicks = local.Ticks - local.Ticks % stepTicks;
+                while (nextTicks <= DateTime.MaxValue.Ticks - stepTicks)
+                {
+                    nextTicks += stepTicks;
+                    DateTime next = new DateTime(nextTicks, DateTimeKind.Unspecified);
+                    if (TimeZoneInfo.Local.IsInvalidTime(next)) continue;
+                    DateTime utc = TimeZoneInfo.ConvertTimeToUtc(next);
+                    if (utc >= endUtc) break;
+                    if (utc > startUtc) ticks.Add(utc);
+                }
+                ticks.Add(endUtc);
+                return ticks;
+            }
+
+            private float AxisLabelWidth(Graphics graphics, DateTime timestamp, bool showDates)
+            {
+                DateTime local = timestamp.ToLocalTime();
+                float width = TextRenderer.MeasureText(graphics, local.ToString("t", CultureInfo.CurrentCulture),
+                    Font, Size.Empty, TextFormatFlags.NoPadding).Width;
+                if (showDates)
+                    width = Math.Max(width, TextRenderer.MeasureText(graphics,
+                        local.ToString("MMM d", CultureInfo.CurrentCulture), Font, Size.Empty, TextFormatFlags.NoPadding).Width);
+                return width;
             }
 
             private PointF GetChartPoint(DateTime timestamp, double remainingPercent)

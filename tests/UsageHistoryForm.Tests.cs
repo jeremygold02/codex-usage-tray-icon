@@ -46,6 +46,8 @@ namespace CodexUsageTray.Tests
                 TestResetCycles(chart, form, now);
                 TestAvailableLimits(form, now);
                 TestPlateauInspection(chart, form, now);
+                TestProjectionThroughReset(chart, form);
+                TestAxisTicks(chart);
             }
         }
 
@@ -229,6 +231,109 @@ namespace CodexUsageTray.Tests
         private static void Raise(Control chart, string method, EventArgs args)
         {
             chart.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(chart, new object[] { args });
+        }
+
+        private static void TestProjectionThroughReset(Control chart, UsageHistoryForm form)
+        {
+            DateTime reset = new DateTime(2026, 10, 9, 17, 0, 0, DateTimeKind.Local).ToUniversalTime();
+            foreach (bool weekly in new[] { true, false })
+            foreach (bool curved in new[] { false, true })
+            {
+                DateTime start = weekly ? reset.AddDays(-7).AddMinutes(10) : reset.AddHours(-5).AddMinutes(10);
+                DateTime observed = weekly ? reset.AddDays(-3) : reset.AddHours(-3);
+                DateTime depleted = weekly ? reset.AddDays(-1) : reset.AddHours(-1);
+                List<UsageHistorySample> samples = new List<UsageHistorySample>
+                {
+                    Sample(start, 0), Sample(observed, 60)
+                };
+                foreach (UsageHistorySample sample in samples)
+                {
+                    UsageHistoryWindow window = sample.Weekly;
+                    window.ResetAtUtc = reset;
+                    if (!weekly) { sample.FiveHour = window; sample.Weekly = null; window.WindowMinutes = 300; }
+                }
+                Update(chart, samples, weekly, observed);
+                Assert(GetDate(chart, "startUtc") == start && GetDate(chart, "endUtc") == reset,
+                    "known reset sets the full chart range even before a forecast is available");
+                UsageProjection projection = new UsageProjection
+                {
+                    StartUtc = observed, EndUtc = depleted, StartRemainingPercent = 40, EndRemainingPercent = 0,
+                    Points = curved ? new List<UsageProjectionPoint>
+                    {
+                        new UsageProjectionPoint { TimestampUtc = observed, RemainingPercent = 40 },
+                        new UsageProjectionPoint { TimestampUtc = depleted, RemainingPercent = 0 }
+                    } : null
+                };
+                chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
+                Assert(GetDate(chart, "endUtc") == reset && projection.EndUtc == depleted,
+                    "early depletion extends the display through reset without changing the forecast endpoint");
+                CountMiddleLinePixels(chart);
+                RectangleF plot = (RectangleF)chart.GetType().GetField("plot", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
+                using (Bitmap image = new Bitmap(chart.Width, chart.Height))
+                {
+                    chart.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                    int orange = 0;
+                    for (int x = (int)(plot.Right - plot.Width * 0.1); x < plot.Right - 2; x++)
+                        for (int y = (int)plot.Bottom - 2; y <= (int)plot.Bottom; y++)
+                        {
+                            Color pixel = image.GetPixel(x, y);
+                            if (pixel.R > pixel.G && pixel.G > pixel.B && pixel.B < 70) orange++;
+                        }
+                    Assert(orange > 20, "the projected zero plateau is visible through the reset for linear and curved paths");
+                }
+                int mouseX = (int)(plot.Right - plot.Width * 0.1);
+                Raise(chart, "OnMouseMove", new MouseEventArgs(MouseButtons.None, 0, mouseX, (int)plot.Top + 20, 0));
+                DateTime selected = (DateTime)chart.GetType().GetField("selectedProjectionUtc", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
+                Label detail = (Label)typeof(UsageHistoryForm).GetField("detailLabel", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+                Assert(selected > depleted && selected < reset && detail.Text.Contains("0% remaining") && detail.Text.Contains("100% used"),
+                    "hover after depletion reports the hovered future time and zero remaining, rather than snapping back to depletion");
+                Update(chart, samples, weekly, observed);
+                chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
+                Assert(detail.Text.Contains(selected.ToLocalTime().ToString("G")),
+                    "refresh preserves inspection on the projected zero plateau");
+                chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { null });
+                Assert(GetDate(chart, "endUtc") == reset && detail.Text.Contains("Latest:"),
+                    "hiding an unavailable forecast retains the reset range and clears its inspection");
+                Update(chart, samples, weekly, reset.AddMinutes(1));
+                Assert(GetDate(chart, "endUtc") == reset.AddMinutes(1), "expired deadlines do not move the time axis backwards");
+            }
+        }
+
+        private static void TestAxisTicks(Control chart)
+        {
+            DateTime start = new DateTime(2026, 10, 2, 17, 13, 23, DateTimeKind.Local).ToUniversalTime();
+            DateTime reset = new DateTime(2026, 10, 9, 17, 0, 0, DateTimeKind.Local).ToUniversalTime();
+            UsageHistorySample sample = Sample(start, 10);
+            sample.Weekly.ResetAtUtc = reset;
+            foreach (int width in new[] { 420, 600, 1000 })
+            {
+                Update(chart, new List<UsageHistorySample> { sample }, true, start);
+                chart.Size = new Size(width, 280);
+                using (Bitmap image = new Bitmap(chart.Width, chart.Height))
+                    chart.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                List<DateTime> ticks = (List<DateTime>)chart.GetType().GetMethod("GetAxisTicks", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(chart, new object[] { 90f });
+                Assert(ticks[0] == start && ticks[ticks.Count - 1] == reset,
+                    "axis always labels the actual first reading and exact reset time");
+                Assert(ticks.Count >= 3 && ticks.Count <= 10, "tick density adapts to chart width");
+                for (int i = 1; i < ticks.Count - 1; i++)
+                    Assert(ticks[i].ToLocalTime().TimeOfDay == TimeSpan.Zero && ticks[i] > ticks[i - 1],
+                        "weekly interior ticks are ordered local calendar boundaries rather than arbitrary fractional dates");
+            }
+            start = reset.AddHours(-5).AddMinutes(13).AddSeconds(23);
+            sample = new UsageHistorySample
+            {
+                TimestampUtc = start,
+                FiveHour = new UsageHistoryWindow { UsedPercent = 10, WindowMinutes = 300, ResetAtUtc = reset }
+            };
+            Update(chart, new List<UsageHistorySample> { sample }, false, start);
+            CountMiddleLinePixels(chart);
+            List<DateTime> shortTicks = (List<DateTime>)chart.GetType().GetMethod("GetAxisTicks", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(chart, new object[] { 90f });
+            Assert(shortTicks.Count > 2 && shortTicks[shortTicks.Count - 1] == reset, "five-hour view includes its reset label");
+            for (int i = 1; i < shortTicks.Count - 1; i++)
+                Assert(shortTicks[i].ToLocalTime().Minute == 0 && shortTicks[i].Second == 0,
+                    "five-hour interior ticks use whole local hours");
         }
 
         private static UsageHistorySample Sample(DateTime timestamp, double used)
