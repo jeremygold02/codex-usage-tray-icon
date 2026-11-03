@@ -90,6 +90,71 @@ jobs:
           dotnet build tests/WpfIntegration/WpfIntegration.csproj --configuration Release --warnaserror
           if ($LASTEXITCODE -ne 0) { throw "WPF integration checks failed to build with exit code $LASTEXITCODE." }
 
+      - name: Validate WPF release package
+        shell: pwsh
+        run: |
+          $outputDir = "bin\Release\net481"
+          $files = @(
+            "CodexUsageTray.exe",
+            "CodexUsageTray.exe.config",
+            "System.Buffers.dll",
+            "System.Memory.dll",
+            "System.Numerics.Vectors.dll",
+            "System.Runtime.CompilerServices.Unsafe.dll",
+            "Wpf.Ui.Abstractions.dll",
+            "Wpf.Ui.dll"
+          )
+          foreach ($name in $files) {
+            $path = Join-Path $outputDir $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) {
+              throw "WPF package file is missing or empty: $name"
+            }
+          }
+          $expectedPaths = @($files | ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $outputDir $_)) })
+          $runtimeFiles = Get-ChildItem -LiteralPath $outputDir -Recurse -File | Where-Object {
+            $_.Extension -in @(".dll", ".exe") -or $_.Name -like "*.exe.config"
+          }
+          foreach ($file in $runtimeFiles) {
+            if ($expectedPaths -notcontains $file.FullName) { throw "Unexpected WPF runtime file: $($file.FullName)" }
+          }
+
+          Add-Type -AssemblyName System.IO.Compression
+          $archivePath = Join-Path $env:RUNNER_TEMP "CodexUsageTray-Wpf.zip"
+          $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+          try {
+            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
+            try {
+              foreach ($name in $files) {
+                $entry = $archive.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+                $inputStream = [System.IO.File]::OpenRead((Join-Path $outputDir $name))
+                try {
+                  $entryStream = $entry.Open()
+                  try { $inputStream.CopyTo($entryStream) } finally { $entryStream.Dispose() }
+                } finally { $inputStream.Dispose() }
+              }
+            } finally { $archive.Dispose() }
+          } finally { $stream.Dispose() }
+
+          $stream = [System.IO.File]::OpenRead($archivePath)
+          try {
+            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read, $true)
+            try {
+              $actual = @($archive.Entries | ForEach-Object { $_.FullName })
+              if ($actual.Count -ne $files.Count -or (Compare-Object $files $actual)) {
+                throw "WPF package does not contain exactly the expected flat set of files."
+              }
+            } finally { $archive.Dispose() }
+          } finally { $stream.Dispose() }
+
+      - name: Run WPF updater tests
+        shell: pwsh
+        run: |
+          dotnet build tests/WpfUpdater/WpfUpdater.Tests.csproj --configuration Release --warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed to build with exit code $LASTEXITCODE." }
+          & .\tests\WpfUpdater\bin\Release\net481\WpfUpdater.Tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed with exit code $LASTEXITCODE." }
+
       - name: Validate updater script syntax
         shell: powershell
         run: |

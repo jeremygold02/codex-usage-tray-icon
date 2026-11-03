@@ -179,6 +179,67 @@ jobs:
             throw "Build completed without creating $exe"
           }
 
+      - name: Build and package WPF UI version
+        if: steps.release_guard.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $outputDir = Join-Path $env:RUNNER_TEMP ("codex-wpf-release-" + [guid]::NewGuid().ToString("N"))
+          dotnet build CodexUsageTray.Wpf.csproj --configuration Release --output $outputDir --warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "WPF build failed with exit code $LASTEXITCODE." }
+
+          $files = @(
+            "CodexUsageTray.exe",
+            "CodexUsageTray.exe.config",
+            "System.Buffers.dll",
+            "System.Memory.dll",
+            "System.Numerics.Vectors.dll",
+            "System.Runtime.CompilerServices.Unsafe.dll",
+            "Wpf.Ui.Abstractions.dll",
+            "Wpf.Ui.dll"
+          )
+          foreach ($name in $files) {
+            $path = Join-Path $outputDir $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) {
+              throw "WPF package file is missing or empty: $name"
+            }
+          }
+          $expectedPaths = @($files | ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $outputDir $_)) })
+          $runtimeFiles = Get-ChildItem -LiteralPath $outputDir -Recurse -File | Where-Object {
+            $_.Extension -in @(".dll", ".exe") -or $_.Name -like "*.exe.config"
+          }
+          foreach ($file in $runtimeFiles) {
+            if ($expectedPaths -notcontains $file.FullName) { throw "Unexpected WPF runtime file: $($file.FullName)" }
+          }
+
+          Add-Type -AssemblyName System.IO.Compression
+          $archivePath = Join-Path (Get-Location).Path "CodexUsageTray-Wpf.zip"
+          $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
+          try {
+            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
+            try {
+              foreach ($name in $files) {
+                $entry = $archive.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+                $inputStream = [System.IO.File]::OpenRead((Join-Path $outputDir $name))
+                try {
+                  $entryStream = $entry.Open()
+                  try { $inputStream.CopyTo($entryStream) } finally { $entryStream.Dispose() }
+                } finally { $inputStream.Dispose() }
+              }
+            } finally { $archive.Dispose() }
+          } finally { $stream.Dispose() }
+
+          $stream = [System.IO.File]::OpenRead($archivePath)
+          try {
+            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read, $true)
+            try {
+              $actual = @($archive.Entries | ForEach-Object { $_.FullName })
+              if ($actual.Count -ne $files.Count -or (Compare-Object $files $actual)) {
+                throw "WPF package does not contain exactly the expected flat set of files."
+              }
+            } finally { $archive.Dispose() }
+          } finally { $stream.Dispose() }
+
       - name: Validate updater script syntax
         if: steps.release_guard.outputs.skip != 'true'
         shell: powershell
@@ -249,6 +310,15 @@ jobs:
             throw "Tests failed with exit code $LASTEXITCODE."
           }
 
+      - name: Run WPF updater tests
+        if: steps.release_guard.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          dotnet build tests/WpfUpdater/WpfUpdater.Tests.csproj --configuration Release --warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed to build with exit code $LASTEXITCODE." }
+          & .\tests\WpfUpdater\bin\Release\net481\WpfUpdater.Tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed with exit code $LASTEXITCODE." }
+
       - name: Generate release notes
         if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
@@ -269,7 +339,8 @@ jobs:
           ) + $commits + @(
             "",
             "## Download",
-            "- ``CodexUsageTray.exe`` is the Windows tray app."
+            "- ``CodexUsageTray.exe`` is the classic single-file Windows tray app.",
+            "- ``CodexUsageTray-Wpf.zip`` contains the WPF UI version and its required files."
           )
           Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
 
@@ -280,7 +351,9 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.version }}" `
             "CodexUsageTray.exe" `
+            "CodexUsageTray-Wpf.zip" `
             --title "${{ steps.version.outputs.version }}" `
             --notes-file "release_notes.md" `
             --target "${{ github.sha }}" `
             --latest
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release creation failed with exit code $LASTEXITCODE." }

@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Collections.Generic;
+using System.Reflection;
 
 namespace CodexUsageTray.Tests
 {
@@ -27,6 +29,7 @@ namespace CodexUsageTray.Tests
             TestBankedResetDetection();
             TestUsageResetNotificationSuppression();
             TestAutomaticResetRedemptionPolicy();
+            TestClassicReleaseAssetSelection();
             UsageHistoryTests.Run();
             UsageFeaturesTests.Run();
             UsageHistoryFormTests.Run();
@@ -44,6 +47,19 @@ namespace CodexUsageTray.Tests
 
             Console.WriteLine("All Codex Usage Tray tests passed.");
             return 0;
+        }
+
+        private static void TestClassicReleaseAssetSelection()
+        {
+            MethodInfo selector = typeof(UpdateService).GetMethod("ReleaseAsset", BindingFlags.NonPublic | BindingFlags.Static);
+            Dictionary<string, object> wpf = new Dictionary<string, object> { { "name", "CodexUsageTray-Wpf.zip" } };
+            Dictionary<string, object> classic = new Dictionary<string, object> { { "name", "CodexUsageTray.exe" } };
+            Dictionary<string, object> release = new Dictionary<string, object> { { "assets", new object[] { wpf, classic } } };
+            AssertTrue(object.ReferenceEquals(selector.Invoke(null, new object[] { release }), classic),
+                "classic updater selects its executable when a WPF package is also available");
+            release["assets"] = new object[] { wpf };
+            AssertTrue(selector.Invoke(null, new object[] { release }) == null,
+                "classic updater does not install the WPF package");
         }
 
         private static void TestRateLimitFixture(string fixturePath)

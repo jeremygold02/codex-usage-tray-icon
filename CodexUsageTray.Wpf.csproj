@@ -14,6 +14,13 @@
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
   </PropertyGroup>
 
+  <ItemGroup Condition="'$(LocalWpfVersion)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>LocalWpfVersion</_Parameter1>
+      <_Parameter2>$(LocalWpfVersion)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Include="CodexUsageTray.cs" />
     <Compile Include="src\*.cs" />
@@ -21,6 +28,7 @@
     <Page Include="wpf\**\*.xaml" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Web" />
+    <Reference Include="System.IO.Compression" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="WPF-UI" Version="4.3.0" />
   </ItemGroup>

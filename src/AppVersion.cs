@@ -13,7 +13,30 @@ namespace CodexUsageTray
 
         public static string Current
         {
-            get { return CleanVersion(BuildVersion.Version); }
+            get
+            {
+#if WPF_UI
+                // Release builds bake their version into BuildVersion. A local
+                // build can identify the release it was built from without
+                // modifying that tracked source file.
+                if (BuildVersion.Version == BaseVersion)
+                {
+                    object[] metadata = typeof(AppVersion).Assembly.GetCustomAttributes(
+                        typeof(System.Reflection.AssemblyMetadataAttribute), false);
+                    foreach (object item in metadata)
+                    {
+                        System.Reflection.AssemblyMetadataAttribute attribute =
+                            item as System.Reflection.AssemblyMetadataAttribute;
+                        if (attribute != null && attribute.Key == "LocalWpfVersion" &&
+                            VersionPattern.IsMatch(attribute.Value ?? ""))
+                        {
+                            return CleanVersion(attribute.Value);
+                        }
+                    }
+                }
+#endif
+                return CleanVersion(BuildVersion.Version);
+            }
         }
 
         public static string GitHubOwner

@@ -106,7 +106,11 @@ namespace CodexUsageTray
             string message;
             if (updateAvailable && !hasInstallAsset)
             {
+#if WPF_UI
+                message = "Version " + latestVersion + " does not include a WPF update package. No compatible update is available yet.";
+#else
                 message = "Update available: " + latestVersion + ", but no Windows exe asset was attached.";
+#endif
             }
             else if (updateAvailable && !hasValidAssetUri)
             {
@@ -153,9 +157,9 @@ namespace CodexUsageTray
             }
             if (string.IsNullOrWhiteSpace(update.AssetUrl))
             {
-                throw new UpdateException("The latest release does not include a Windows exe asset.");
+                throw new UpdateException("The latest release does not include a compatible Windows update asset.");
             }
-            if (!string.Equals(ComparableExeStem(update.AssetName), ComparableExeStem(AppVersion.ReleaseAssetName), StringComparison.OrdinalIgnoreCase))
+            if (!IsExpectedReleaseAsset(update.AssetName))
             {
                 throw new UpdateException("The release asset name is not valid for automatic installation.");
             }
@@ -178,8 +182,10 @@ namespace CodexUsageTray
                 throw new UpdateException("Self-update is only available in the packaged Windows app with Windows PowerShell installed.");
             }
 
+#if !WPF_UI
             string backupExe = targetExe + ".bak";
             VerifyBackupPath(backupExe);
+#endif
             VerifyInstallDirectory(appDir, targetExe);
 
             string tempDir = "";
@@ -187,18 +193,27 @@ namespace CodexUsageTray
             string stagedExe = "";
             string scriptPath = "";
             bool updaterStarted = false;
+#if WPF_UI
+            WpfUpdatePreparation preparation = null;
+#endif
 
             try
             {
                 string updateId = Guid.NewGuid().ToString("N");
                 tempDir = Path.Combine(Path.GetTempPath(), "codex_usage_tray_update_" + updateId);
-                downloadedExe = Path.Combine(tempDir, AppVersion.ReleaseAssetName + ".download");
+                downloadedExe = Path.Combine(tempDir, "release.download");
+#if !WPF_UI
                 stagedExe = Path.Combine(appDir, "." + AppVersion.ReleaseAssetName + ".update-" + updateId + ".tmp");
+#endif
                 scriptPath = Path.Combine(tempDir, "update.ps1");
 
                 Directory.CreateDirectory(tempDir);
                 DownloadFile(assetUri, downloadedExe, update.AssetSize);
                 VerifyAssetFile(downloadedExe, update.AssetSize, update.AssetSha256);
+#if WPF_UI
+                preparation = WpfUpdatePackage.Prepare(downloadedExe, appDir, targetExe, tempDir, updateId, Process.GetCurrentProcess().Id);
+                scriptPath = preparation.ScriptPath;
+#else
                 VerifyPortableExecutable(downloadedExe);
 
                 File.Copy(downloadedExe, stagedExe, false);
@@ -206,6 +221,7 @@ namespace CodexUsageTray
                 VerifyPortableExecutable(stagedExe);
 
                 WriteUpdaterScript(scriptPath, stagedExe, targetExe, backupExe, Process.GetCurrentProcess().Id);
+#endif
                 TryDeleteFile(downloadedExe);
                 StartUpdaterScript(powerShellPath, scriptPath, targetExe);
                 updaterStarted = true;
@@ -241,6 +257,9 @@ namespace CodexUsageTray
             {
                 if (!updaterStarted)
                 {
+#if WPF_UI
+                    if (preparation != null) preparation.Cleanup();
+#endif
                     TryDeleteFile(stagedExe);
                     TryDeleteDirectory(tempDir);
                 }
@@ -309,7 +328,6 @@ namespace CodexUsageTray
                 return null;
             }
 
-            string expectedStem = ComparableExeStem(AppVersion.ReleaseAssetName);
             foreach (object item in assets)
             {
                 Dictionary<string, object> asset = item as Dictionary<string, object>;
@@ -318,13 +336,22 @@ namespace CodexUsageTray
                     continue;
                 }
 
-                if (string.Equals(ComparableExeStem(GetString(asset, "name")), expectedStem, StringComparison.OrdinalIgnoreCase))
+                if (IsExpectedReleaseAsset(GetString(asset, "name")))
                 {
                     return asset;
                 }
             }
 
             return null;
+        }
+
+        private static bool IsExpectedReleaseAsset(string name)
+        {
+#if WPF_UI
+            return string.Equals(name, WpfUpdatePackage.AssetName, StringComparison.OrdinalIgnoreCase);
+#else
+            return string.Equals(ComparableExeStem(name), ComparableExeStem(AppVersion.ReleaseAssetName), StringComparison.OrdinalIgnoreCase);
+#endif
         }
 
         private static string ComparableExeStem(string name)

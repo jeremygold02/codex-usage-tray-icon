@@ -18,6 +18,7 @@
     <Page Include="..\..\wpf\**\*.xaml" />
     <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Web" />
+    <Reference Include="System.IO.Compression" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <PackageReference Include="WPF-UI" Version="4.3.0" />
   </ItemGroup>

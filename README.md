@@ -16,13 +16,15 @@ The app looks for the standard npm Codex installation and then for `codex` on th
 
 ## Download
 
-Download the latest `CodexUsageTray.exe` from the [GitHub releases page](https://github.com/jeremygold02/codex-usage-tray-icon/releases/latest).
+Download `CodexUsageTray-Wpf.zip` from the [GitHub releases page](https://github.com/jeremygold02/codex-usage-tray-icon/releases/latest) for the WPF interface, or `CodexUsageTray.exe` for the classic single-file build. Older releases may not include the WPF package.
 
 ## WPF UI build
 
 The WPF UI build integrates the redesigned popup, settings, and history header with the existing tray app and real usage data. The interactive history graph continues to use the existing chart renderer. To build it locally on Windows with the .NET SDK and .NET Framework 4.8.1, run `dotnet build CodexUsageTray.Wpf.csproj -c Release`, then run `bin\Release\net481\CodexUsageTray.exe` from its output directory. Keep the accompanying DLL and configuration files with the executable. Close any existing tray instance before starting this build; the two builds share a single-instance lock and the same user settings and history.
 
-The existing release and updater are single-executable distributions and do not yet package the WPF build's companion files. The WPF build can check for updates, but installing a single-file release over it is disabled; rebuild or install a complete matching WPF build instead.
+Release builds embed their release version. For a local build based on a known release, add `-p:LocalWpfVersion=<release-version>` to the build command so update checks compare against that version instead of the development default.
+
+WPF updates use the matching WPF package from a release. The app verifies its download and stages its complete set of files before restarting; if installation or startup fails, it attempts to restore the previous files. Classic builds continue to use the single-executable release. A release without a matching WPF package cannot be installed as a WPF update.
 
 ## How usage is read
 
