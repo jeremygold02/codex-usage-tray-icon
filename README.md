@@ -2,9 +2,9 @@
 
 Codex Usage Tray is a Windows tray utility for monitoring the usage limits of the account signed in to the Codex CLI. The tray icon shows the selected remaining-usage percentage, and a left-click opens a compact popup with weekly and 5-hour remaining usage, estimated time until depletion, and reset timing.
 
-![Codex Usage tray popup showing time remaining at current pace and available resets](docs/images/tray-usage-details.png)
+![Codex Usage WPF popup showing usage history, remaining limits, and available resets](docs/images/tray-usage-details.png)
 
-_Usage values and reset dates shown above are sample data._
+_Screenshots use sample data and combine off-screen captures of the app and its WPF surfaces._
 
 ## Requirements
 
@@ -83,7 +83,7 @@ Available banked resets are always listed directly below usage, with their count
 - Successful quota readings are saved locally in `%APPDATA%\CodexUsageTray\usage-history.json` and `claude-usage-history.json`, with the same rolling caps of 28 days and 45,000 observations. Repeated unchanged readings are compacted while preserving endpoints and hourly anchors. Patterns can learn across reset cycles and survive restart; interval consumption and validation never cross a reset. Older readings are removed automatically. Claude's CLI token logs cannot reconstruct quota percentages, so its learning uses actual quota readings collected by the tray.
 - After the first successful Codex refresh, a one-time background import reads up to four weeks of account-quota events from local `sessions` and `archived_sessions` under `CODEX_HOME` (or `%USERPROFILE%\.codex`). Prior reset cycles are included. Cached regressive events and events contradicting live readings are excluded rather than interpreted as resets; token counts are never converted into quota percentages. Import scans recent files first, with a 30-second or 8-GiB budget per attempt; interrupted scans resume on a later refresh and only reread unfinished/appended data. Completion and retained imported days are stored in `usage-history.json.imported`, so normal launches with intact history do not rescan. If an older app removed the backfilled cycles, the missing coverage triggers a repair import. Normal four-week expiry does not trigger a scan. Existing installations receive one repair backfill when upgrading from completion flags that did not record coverage. Afterward, normal usage refreshes update the local learning window for both providers. History belongs to the Windows user and is not separated by account. Source logs remain untouched.
 
-![Weekly usage history with a reset marker and an observation gap](docs/images/usage-history.png)
+![Weekly usage history with observed and projected remaining allowance](docs/images/usage-history.png)
 
 _The history chart above uses sample data._
 
