@@ -23,7 +23,7 @@ namespace CodexUsageTray
         private static int assertions;
         private static string lastProcessDiagnostics;
 
-        private static int Main()
+        private static int Main(string[] args)
         {
             if (Path.GetFileNameWithoutExtension(Process.GetCurrentProcess().MainModule.FileName)
                 .StartsWith("wpf-test-app-", StringComparison.OrdinalIgnoreCase))
@@ -35,10 +35,18 @@ namespace CodexUsageTray
             try
             {
                 fakeApp = File.ReadAllBytes(Process.GetCurrentProcess().MainModule.FileName);
-                TestReleaseAssetAndIntegrity();
-                TestPreparation();
-                TestUnsafeArchives();
-                TestInstallAndRollback();
+                if (args.Length == 1 && args[0] == "--detach-only")
+                {
+                    TestUpdaterDetachment();
+                }
+                else
+                {
+                    TestReleaseAssetAndIntegrity();
+                    TestPreparation();
+                    TestUnsafeArchives();
+                    TestInstallAndRollback();
+                    TestUpdaterDetachment();
+                }
                 Console.WriteLine("WPF updater tests passed (" + assertions + " assertions).");
                 DeleteTestRoot();
                 return 0;
@@ -208,6 +216,128 @@ namespace CodexUsageTray
             RunInstallCase("startup-failure", File.ReadAllBytes(failingExe), true);
             TestRunningProcessHandoff();
             for (int position = 0; position < Names.Length; position++) RunLockedCase(position);
+        }
+
+        private static void TestUpdaterDetachment()
+        {
+            TestUpdaterExitsBeforeChild(false);
+            TestUpdaterExitsBeforeChild(true);
+
+            // Match the tray's WinExe subsystem as well as this test runner's
+            // console subsystem without building or launching the real app.
+            byte[] console = fakeApp;
+            try
+            {
+                fakeApp = (byte[])console.Clone();
+                int pe = BitConverter.ToInt32(fakeApp, 0x3c);
+                Check(pe > 0 && pe + 94 <= fakeApp.Length && fakeApp[pe] == (byte)'P' && fakeApp[pe + 1] == (byte)'E',
+                    "synthetic executable has a PE header");
+                fakeApp[pe + 92] = 2; // IMAGE_SUBSYSTEM_WINDOWS_GUI
+                fakeApp[pe + 93] = 0;
+                TestUpdaterExitsBeforeChild(false);
+                TestUpdaterExitsBeforeChild(true);
+                TestStoppingCompletedUpdaterLeavesChildRunning();
+            }
+            finally { fakeApp = console; }
+        }
+
+        private static void TestUpdaterExitsBeforeChild(bool nestedPowerShell)
+        {
+            var env = NewEnvironment(nestedPowerShell ? "detach-powershell" : "detach-direct");
+            string archive = CreateArchive(env, ValidEntries(fakeApp));
+            var preparation = Prepare(env, archive);
+            string updaterPidFile = Path.Combine(env.Case, "synthetic-updater-pid.txt");
+            string unrelatedTempFile = Path.Combine(env.Temp, "unrelated-temp-file.txt");
+            File.WriteAllText(unrelatedTempFile, "keep");
+            DateTime caseStarted = DateTime.Now;
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                int exitCode;
+                if (nestedPowerShell)
+                {
+                    // Reproduce a PowerShell caller using Start-Process -PassThru.
+                    // Both the script and PID file are in this isolated test case.
+                    string args = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + preparation.ScriptPath + "\"";
+                    string command = "$p = Start-Process -FilePath '" + PowerShellPath().Replace("'", "''") +
+                        "' -ArgumentList '" + args.Replace("'", "''") + "' -WindowStyle Hidden -PassThru; " +
+                        "[IO.File]::WriteAllText('" + updaterPidFile.Replace("'", "''") + "', $p.Id.ToString()); " +
+                        "if (-not $p.WaitForExit(15000)) { [Console]::Error.WriteLine('Synthetic updater is still running after 15 seconds.'); exit 55 }; exit $p.ExitCode";
+                    exitCode = RunPowerShellCommand(command);
+                }
+                else exitCode = RunPowerShell(preparation.ScriptPath);
+                clock.Stop();
+                Check(exitCode == 0, "updater exits before its synthetic child (nested PowerShell: " + nestedPowerShell + "), exit code " + exitCode);
+                Check(clock.Elapsed < TimeSpan.FromSeconds(15), "updater process exits within 15 seconds (nested PowerShell: " + nestedPowerShell + ")");
+                Check(File.Exists(unrelatedTempFile) && File.ReadAllText(unrelatedTempFile) == "keep",
+                    "updater exits without deleting unrelated files in its temporary directory");
+                WaitForFakeApp(env);
+                int childPid;
+                Check(int.TryParse(File.ReadAllText(Path.Combine(env.App, "synthetic-process-id.txt")), out childPid), "synthetic child PID is available");
+                using (var child = Process.GetProcessById(childPid))
+                    Check(!child.HasExited && string.Equals(child.MainModule.FileName, env.Target, StringComparison.OrdinalIgnoreCase),
+                        "synthetic child remains running after its updater exits");
+            }
+            finally
+            {
+                StopFakeApp(env);
+                // Only the uniquely recorded updater spawned by this case may be
+                // terminated; never touch a pre-existing PowerShell or tray process.
+                int updaterPid;
+                if (File.Exists(updaterPidFile) && int.TryParse(File.ReadAllText(updaterPidFile), out updaterPid))
+                {
+                    try
+                    {
+                        using (var updater = Process.GetProcessById(updaterPid))
+                            if (updater.StartTime >= caseStarted.AddSeconds(-1) &&
+                                string.Equals(updater.MainModule.FileName, PowerShellPath(), StringComparison.OrdinalIgnoreCase) &&
+                                !updater.WaitForExit(5000)) { updater.Kill(); updater.WaitForExit(5000); }
+                    }
+                    catch (ArgumentException) { }
+                    catch (InvalidOperationException) { }
+                }
+                preparation.Cleanup();
+            }
+        }
+
+        private static void TestStoppingCompletedUpdaterLeavesChildRunning()
+        {
+            var env = NewEnvironment("stop-completed-updater");
+            string archive = CreateArchive(env, ValidEntries(fakeApp));
+            var preparation = Prepare(env, archive);
+            string cleanupReady = Path.Combine(env.Case, "synthetic-cleanup-ready.txt");
+            Process updater = null;
+            try
+            {
+                // Pause only this synthetic script after successful child startup,
+                // modeling a completed updater that is stuck in final cleanup.
+                string script = File.ReadAllText(preparation.ScriptPath);
+                const string cleanup = "try { [IO.Directory]::Delete($tempDir, $false) } catch {}";
+                Check(script.Contains(cleanup), "synthetic updater cleanup hook exists");
+                string pause = "[IO.File]::WriteAllText('" + cleanupReady.Replace("'", "''") + "', 'ready'); Start-Sleep -Seconds 30";
+                File.WriteAllText(preparation.ScriptPath, script.Replace(cleanup, pause), new UTF8Encoding(false));
+                updater = Process.Start(new ProcessStartInfo {
+                    FileName = PowerShellPath(), Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + preparation.ScriptPath + "\"",
+                    UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden
+                });
+                Check(updater != null, "synthetic updater starts");
+                for (int attempt = 0; attempt < 150 && !File.Exists(cleanupReady) && !updater.HasExited; attempt++) Thread.Sleep(100);
+                Check(File.Exists(cleanupReady) && !updater.HasExited, "synthetic updater reached the paused cleanup");
+                WaitForFakeApp(env);
+                int childPid = int.Parse(File.ReadAllText(Path.Combine(env.App, "synthetic-process-id.txt")));
+                updater.Kill();
+                Check(updater.WaitForExit(5000), "only the synthetic updater was stopped");
+                Thread.Sleep(1000);
+                using (var child = Process.GetProcessById(childPid))
+                    Check(!child.HasExited && string.Equals(child.MainModule.FileName, env.Target, StringComparison.OrdinalIgnoreCase),
+                        "synthetic tray child survives stopping its completed updater");
+            }
+            finally
+            {
+                if (updater != null) { if (!updater.HasExited) { updater.Kill(); updater.WaitForExit(5000); } updater.Dispose(); }
+                StopFakeApp(env);
+                preparation.Cleanup();
+            }
         }
 
         private static void TestRunningProcessHandoff()

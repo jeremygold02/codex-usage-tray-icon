@@ -292,7 +292,7 @@ namespace CodexUsageTray
                 "  foreach ($item in $items) {",
                 "    foreach ($folder in @($incoming, $backup)) { foreach ($suffix in @('', '.restore', '.replaced', '.failed')) { $file = (Join-Path $folder $item.Source) + $suffix; if (Test-Path -LiteralPath $file -PathType Leaf) { Remove-Item -LiteralPath $file -Force } } }",
                 "  }",
-                "  Remove-Item -LiteralPath $incoming -Force; Remove-Item -LiteralPath $backup -Force; Remove-Item -LiteralPath $stage -Force",
+                "  [IO.Directory]::Delete($incoming, $false); [IO.Directory]::Delete($backup, $false); [IO.Directory]::Delete($stage, $false)",
                 "}",
                 "$success = $false; $rollbackComplete = $true; $exitCode = 1; $mutex = $null; $ownsMutex = $false; $started = $null",
                 "try {",
@@ -348,7 +348,7 @@ namespace CodexUsageTray
                 "} finally {",
                 "  if ($ownsMutex) { $mutex.ReleaseMutex() }; if ($null -ne $mutex) { $mutex.Dispose() }",
                 "  if ($success -or $rollbackComplete) { try { Remove-Staging } catch { Log ('Staging cleanup failed: ' + $_.Exception.Message) } }",
-                "  if ($success) { Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $tempDir -Force -ErrorAction SilentlyContinue }",
+                "  if ($success) { Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue; try { [IO.Directory]::Delete($tempDir, $false) } catch {} }",
                 "}",
                 "exit $exitCode"
             });
