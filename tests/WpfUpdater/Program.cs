@@ -20,6 +20,7 @@ namespace CodexUsageTray
         private static string root;
         private static byte[] fakeApp;
         private static int assertions;
+        private static string lastProcessDiagnostics;
 
         private static int Main()
         {
@@ -44,6 +45,7 @@ namespace CodexUsageTray
             catch (Exception error)
             {
                 Console.Error.WriteLine(error);
+                PrintFailureDiagnostics();
                 Console.Error.WriteLine("Synthetic test files retained: " + root);
                 return 1;
             }
@@ -52,24 +54,37 @@ namespace CodexUsageTray
         private static int RunFakeApp()
         {
             string directory = AppDomain.CurrentDomain.BaseDirectory;
-            string mutexName = File.ReadAllText(Path.Combine(directory, "synthetic-mutex.txt"));
-            bool createdNew;
-            using (var mutex = new Mutex(true, mutexName, out createdNew))
+            try
             {
-                if (!createdNew) return 92;
-                File.WriteAllText(Path.Combine(directory, "synthetic-process-id.txt"), Process.GetCurrentProcess().Id.ToString());
-                string exitSignal = Path.Combine(directory, "synthetic-exit.txt");
-                for (int tick = 0; tick < 300; tick++)
+                string mutexName = File.ReadAllText(Path.Combine(directory, "synthetic-mutex.txt"));
+                bool createdNew;
+                using (var mutex = new Mutex(true, mutexName, out createdNew))
                 {
-                    if (File.Exists(exitSignal))
+                    if (!createdNew)
                     {
-                        File.Delete(exitSignal);
-                        File.Delete(Path.Combine(directory, "synthetic-process-id.txt"));
-                        return 0;
+                        File.WriteAllText(Path.Combine(directory, "synthetic-error.txt"), "The synthetic app's isolated mutex already exists.");
+                        return 92;
                     }
-                    Thread.Sleep(100);
+                    File.WriteAllText(Path.Combine(directory, "synthetic-process-id.txt"), Process.GetCurrentProcess().Id.ToString());
+                    string exitSignal = Path.Combine(directory, "synthetic-exit.txt");
+                    for (int tick = 0; tick < 300; tick++)
+                    {
+                        if (File.Exists(exitSignal))
+                        {
+                            File.Delete(exitSignal);
+                            File.Delete(Path.Combine(directory, "synthetic-process-id.txt"));
+                            return 0;
+                        }
+                        Thread.Sleep(100);
+                    }
+                    return 0;
                 }
-                return 0;
+            }
+            catch (Exception error)
+            {
+                try { File.WriteAllText(Path.Combine(directory, "synthetic-error.txt"), error.ToString()); } catch { }
+                Console.Error.WriteLine(error);
+                return 91;
             }
         }
 
@@ -102,6 +117,8 @@ namespace CodexUsageTray
             ExpectFailure(() => Invoke("VerifyAssetFile", assetFile, 3L, new string('0', 64)), "digest mismatch");
             ExpectFailure(() => Invoke("VerifyAssetFile", assetFile, 4L, hash), "asset size mismatch");
             Check(AppVersion.Current == AppVersion.DisplayVersion(BuildVersion.Version), "baked release version is respected");
+            Check(RunPowerShellCommand("[Console]::Error.WriteLine('synthetic stderr'); exit 41") == 41 &&
+                lastProcessDiagnostics.Contains("synthetic stderr"), "child process stderr is captured for failures");
         }
 
         private static bool ExpectedAsset(string name) { return (bool)Invoke("IsExpectedReleaseAsset", name); }
@@ -282,7 +299,7 @@ namespace CodexUsageTray
                 string script = File.ReadAllText(preparation.ScriptPath);
                 Check(script.Contains("CodexUsageTray.Test."), "synthetic updater uses an isolated mutex");
                 int exitCode = RunPowerShell(preparation.ScriptPath);
-                Check(exitCode == (shouldRollback ? 1 : 0), name + " updater exit status");
+                Check(exitCode == (shouldRollback ? 1 : 0), name + " updater exit status: " + exitCode);
                 Check(File.ReadAllText(Path.Combine(env.App, "user-note.txt")) == "keep", name + " preserves unrelated file");
                 if (shouldRollback)
                 {
@@ -384,11 +401,40 @@ namespace CodexUsageTray
             info.UseShellExecute = false;
             info.CreateNoWindow = true;
             info.WindowStyle = ProcessWindowStyle.Hidden;
-            using (Process child = Process.Start(info))
+            info.RedirectStandardOutput = true;
+            info.RedirectStandardError = true;
+            var captured = new StringBuilder();
+            using (var child = new Process())
             {
-                if (child == null || !child.WaitForExit(30000)) throw new TimeoutException("Synthetic updater process did not finish.");
+                child.StartInfo = info;
+                child.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) lock (captured) captured.AppendLine(e.Data); };
+                child.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) lock (captured) captured.AppendLine(e.Data); };
+                lastProcessDiagnostics = "";
+                if (!child.Start()) throw new InvalidOperationException("Synthetic updater process could not start.");
+                child.BeginOutputReadLine();
+                child.BeginErrorReadLine();
+                if (!child.WaitForExit(30000)) throw new TimeoutException("Synthetic updater process did not finish.");
+                // Drain asynchronous readers so the logs survive ephemeral CI runners.
+                child.WaitForExit();
+                lock (captured) lastProcessDiagnostics = captured.ToString();
                 return child.ExitCode;
             }
+        }
+
+        private static void PrintFailureDiagnostics()
+        {
+            if (!string.IsNullOrEmpty(lastProcessDiagnostics))
+                Console.Error.WriteLine("Last synthetic child output:\n" + lastProcessDiagnostics);
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+            try
+            {
+                var files = Directory.GetFiles(root, "update.log", SearchOption.AllDirectories)
+                    .Concat(Directory.GetFiles(root, "synthetic-error.txt", SearchOption.AllDirectories))
+                    .OrderByDescending(File.GetLastWriteTimeUtc).Take(8);
+                foreach (string file in files)
+                    Console.Error.WriteLine("Synthetic diagnostic " + file + ":\n" + File.ReadAllText(file));
+            }
+            catch (Exception error) { Console.Error.WriteLine("Could not collect synthetic diagnostics: " + error.Message); }
         }
 
         private static void WaitForFakeApp(TestEnvironment env)
