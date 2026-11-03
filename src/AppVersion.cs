@@ -19,7 +19,7 @@ namespace CodexUsageTray
                 // Release builds bake their version into BuildVersion. A local
                 // build can identify the release it was built from without
                 // modifying that tracked source file.
-                if (BuildVersion.Version == BaseVersion)
+                if (string.Equals(BuildVersion.Version, BaseVersion, StringComparison.Ordinal))
                 {
                     object[] metadata = typeof(AppVersion).Assembly.GetCustomAttributes(
                         typeof(System.Reflection.AssemblyMetadataAttribute), false);
