@@ -82,6 +82,14 @@ jobs:
             throw "Build created an empty executable."
           }
 
+      - name: Build WPF UI version
+        shell: pwsh
+        run: |
+          dotnet build CodexUsageTray.Wpf.csproj --configuration Release --warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "WPF UI build failed with exit code $LASTEXITCODE." }
+          dotnet build tests/WpfIntegration/WpfIntegration.csproj --configuration Release --warnaserror
+          if ($LASTEXITCODE -ne 0) { throw "WPF integration checks failed to build with exit code $LASTEXITCODE." }
+
       - name: Validate updater script syntax
         shell: powershell
         run: |

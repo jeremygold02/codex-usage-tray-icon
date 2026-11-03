@@ -1,20 +1,31 @@
 using System;
 using System.IO;
 using System.Reflection;
+using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
 
 namespace CodexUsageTray.Tests
 {
     internal static class UsageFeaturesTests
     {
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr handle);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
+
         public static void Run()
         {
             TestTrayMetric();
+            TestComboRendering();
             string directory = Path.Combine(Path.GetTempPath(), "CodexUsageFeatures-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(directory);
             try
             {
                 TestReminders(Path.Combine(directory, "reminders.json"));
                 TestSettings(Path.Combine(directory, "settings.json"));
+                TestSettingsForm(Path.Combine(directory, "ui-settings.json"));
             }
             finally
             {
@@ -81,17 +92,174 @@ namespace CodexUsageTray.Tests
             AppSettings settings = (AppSettings)load.Invoke(null, new object[] { path });
             Assert(settings.IconMetric == AppSettings.IconMetricFiveHour, "upgrade preserves chosen tray metric");
             Assert(settings.ResetExpiryReminders && settings.ResetExpiryLeadHours == 24, "upgrade initializes reminders");
+            Assert(settings.ForecastMethod == AppSettings.ForecastLearnedRoutine && settings.QuietHoursMode == AppSettings.QuietHoursAutomatic &&
+                settings.ShowProjectedUsage && !settings.HighlightQuietHours, "upgrade initializes forecast preferences");
             settings.IconMetric = AppSettings.IconMetricAuto;
             settings.ResetExpiryReminders = false;
             settings.ResetExpiryLeadHours = 6;
+            settings.ForecastMethod = AppSettings.ForecastRecentPace;
+            settings.QuietHoursMode = AppSettings.QuietHoursOff;
+            settings.ShowProjectedUsage = false;
+            settings.HighlightQuietHours = true;
             save.Invoke(settings, new object[] { path });
             AppSettings reloaded = (AppSettings)load.Invoke(null, new object[] { path });
             Assert(reloaded.IconMetric == AppSettings.IconMetricAuto && !reloaded.ResetExpiryReminders &&
-                reloaded.ResetExpiryLeadHours == 6, "new settings round trip");
+                reloaded.ResetExpiryLeadHours == 6 && reloaded.ForecastMethod == AppSettings.ForecastRecentPace &&
+                reloaded.QuietHoursMode == AppSettings.QuietHoursOff && !reloaded.ShowProjectedUsage && reloaded.HighlightQuietHours,
+                "new settings round trip");
             AppSettings copy = new AppSettings();
             copy.CopyValuesFrom(reloaded);
             Assert(copy.IconMetric == AppSettings.IconMetricAuto && !copy.ResetExpiryReminders &&
-                copy.ResetExpiryLeadHours == 6, "applying settings copies new values");
+                copy.ResetExpiryLeadHours == 6 && copy.ForecastMethod == AppSettings.ForecastRecentPace &&
+                copy.QuietHoursMode == AppSettings.QuietHoursOff && !copy.ShowProjectedUsage && copy.HighlightQuietHours,
+                "applying settings copies new values");
+        }
+
+        private static void TestSettingsForm(string path)
+        {
+            MethodInfo save = typeof(AppSettings).GetMethod("SaveToPath", BindingFlags.NonPublic | BindingFlags.Instance);
+            MethodInfo load = typeof(AppSettings).GetMethod("LoadFromPath", BindingFlags.NonPublic | BindingFlags.Static);
+            AppSettings settings = new AppSettings { IconMetric = AppSettings.IconMetricAuto, LowThreshold = 35 };
+            int saves = 0;
+            using (SettingsForm form = new SettingsForm(settings, delegate(AppSettings candidate)
+            {
+                saves++;
+                save.Invoke(candidate, new object[] { path });
+            }))
+            {
+                Color initialBackground = form.BackColor;
+                form.BackColor = Color.Magenta;
+                typeof(SettingsForm).GetMethod("OnSystemColorsChanged", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(form, new object[] { EventArgs.Empty });
+                Assert(form.BackColor == initialBackground && saves == 0,
+                    "system color changes reapply the selected settings theme without saving");
+                PrepareHiddenForm(form);
+                Application.DoEvents();
+                Button[] navigation = (Button[])Field(form, "navigationButtons");
+                Control[] pages = (Control[])Field(form, "pages");
+                for (int i = 0; i < navigation.Length; i++)
+                {
+                    navigation[i].PerformClick();
+                    for (int j = 0; j < pages.Length; j++)
+                        Assert(pages[j].Visible == (i == j), "settings navigation shows only its selected page");
+                    int[] minimumCards = { 3, 4, 3, 4, 3, 1 };
+                    Assert(CountCards(pages[i]) >= minimumCards[i], "every settings page uses grouped cards");
+                    Assert(!IsWindowVisible(form.Handle), "settings navigation must not show a preview window");
+                }
+                navigation[1].PerformClick();
+                CheckBox alerts = (CheckBox)Field(form, "thresholdNotificationsCheckBox");
+                Control thresholdControls = (Control)Field(form, "thresholdControls");
+                Assert(!thresholdControls.Enabled, "threshold settings are disabled when alerts are off");
+                alerts.Checked = true;
+                Assert(thresholdControls.Enabled, "threshold settings enable with alerts");
+                NumericUpDown critical = (NumericUpDown)Field(form, "criticalNumeric");
+                NumericUpDown low = (NumericUpDown)Field(form, "lowNumeric");
+                critical.Value = 45;
+                Assert(low.Value == 45, "critical threshold keeps low threshold valid");
+
+                navigation[2].PerformClick();
+                RadioButton recent = (RadioButton)Field(form, "recentPaceRadio");
+                RadioButton learned = (RadioButton)Field(form, "learnedRoutineRadio");
+                ComboBox quiet = (ComboBox)Field(form, "quietHoursCombo");
+                CheckBox projected = (CheckBox)Field(form, "showProjectedUsageCheckBox");
+                CheckBox highlight = (CheckBox)Field(form, "highlightQuietHoursCheckBox");
+                recent.Checked = true;
+                Assert(!quiet.Enabled && !highlight.Enabled, "recent pace disables learned quiet-hour controls");
+                learned.Checked = true;
+                quiet.SelectedIndex = 1;
+                Assert(quiet.Enabled && !highlight.Enabled, "turning off learned quiet hours disables highlighting");
+                quiet.SelectedIndex = 0;
+                projected.Checked = true;
+                Assert(highlight.Enabled, "quiet-hour highlighting can be enabled for the learned forecast");
+
+                navigation[3].PerformClick();
+                ComboBox theme = (ComboBox)Field(form, "themeCombo");
+                Assert(theme.SelectedIndex >= 0 && !string.IsNullOrEmpty(theme.Text), "theme shows a selected value");
+                theme.SelectedIndex = 0;
+                SendMessage(theme.Handle, 0x100, new IntPtr(0x28), IntPtr.Zero);
+                SendMessage(theme.Handle, 0x101, new IntPtr(0x28), IntPtr.Zero);
+                Assert(theme.SelectedIndex == 1, "theme selector remains keyboard navigable");
+                CheckBox trayBackground = (CheckBox)Field(form, "showTrayBoxCheckBox");
+                Control trayBackgroundControls = (Control)Field(form, "trayBackgroundControls");
+                trayBackground.Checked = false;
+                Assert(!trayBackgroundControls.Enabled, "background color controls disable when the background is hidden");
+                trayBackground.Checked = true;
+                Assert(trayBackgroundControls.Enabled, "background color controls enable when the background is shown");
+                ((NumericUpDown)Field(form, "previewPercentNumeric")).Value = 17;
+                Assert(((PictureBox)Field(form, "trayPreview")).Image != null, "tray preview updates at the chosen sample value");
+
+                typeof(SettingsForm).GetMethod("RestoreDefaults", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(form, null);
+                Assert(settings.IconMetric == AppSettings.IconMetricAuto && settings.LowThreshold == 35 && saves == 0,
+                    "restore defaults changes controls without saving settings");
+                recent.Checked = true;
+                projected.Checked = false;
+                bool applied = (bool)typeof(SettingsForm).GetMethod("TryApplyToSettings", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(form, null);
+                AppSettings persisted = (AppSettings)load.Invoke(null, new object[] { path });
+                Assert(applied && saves == 1 && settings.ForecastMethod == AppSettings.ForecastRecentPace &&
+                    !settings.ShowProjectedUsage && persisted.ForecastMethod == AppSettings.ForecastRecentPace && !persisted.ShowProjectedUsage,
+                    "save persists and applies forecast controls");
+                form.Close();
+            }
+            using (SettingsForm form = new SettingsForm(settings, delegate(AppSettings candidate) { saves++; }))
+            {
+                PrepareHiddenForm(form);
+                ((RadioButton)Field(form, "learnedRoutineRadio")).Checked = true;
+                ((Button)form.CancelButton).PerformClick();
+                Assert((form.IsDisposed || form.DialogResult == DialogResult.Cancel) && saves == 1 &&
+                    settings.ForecastMethod == AppSettings.ForecastRecentPace,
+                    "cancel discards unsaved controls");
+            }
+        }
+
+        private static void PrepareHiddenForm(Form form)
+        {
+            IntPtr handle = form.Handle;
+            // Make child controls participate in layout and clicks without ever
+            // setting the native top-level window visible or activating it.
+            typeof(Control).GetMethod("SetState", BindingFlags.NonPublic | BindingFlags.Instance)
+                .Invoke(form, new object[] { 2, true });
+            form.CreateControl();
+            Assert(!IsWindowVisible(handle), "settings tests must not show a preview window");
+        }
+
+        private static int CountCards(Control root)
+        {
+            int count = root is SettingsCard ? 1 : 0;
+            foreach (Control child in root.Controls) count += CountCards(child);
+            return count;
+        }
+
+        private static void TestComboRendering()
+        {
+            using (ComboBox combo = new ComboBox())
+            {
+                combo.Items.AddRange(new object[] { "System Default", "Dark Mode", "Light Mode" });
+                combo.SelectedIndex = 1;
+                foreach (bool highContrast in new[] { false, true })
+                foreach (bool selected in new[] { false, true })
+                using (Bitmap bitmap = new Bitmap(210, 32))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    combo.BackColor = highContrast ? SystemColors.Window : Color.FromArgb(31, 36, 43);
+                    combo.ForeColor = highContrast ? SystemColors.WindowText : Color.White;
+                    Color expected = selected ? (highContrast ? SystemColors.Highlight : Color.FromArgb(31, 68, 105)) : combo.BackColor;
+                    DrawItemState state = selected ? DrawItemState.Selected : DrawItemState.ComboBoxEdit;
+                    DrawItemEventArgs args = new DrawItemEventArgs(graphics, combo.Font,
+                        new Rectangle(0, 0, bitmap.Width, bitmap.Height), combo.SelectedIndex, state, combo.ForeColor, combo.BackColor);
+                    SettingsForm.DrawComboItem(combo, args, highContrast);
+                    Assert(bitmap.GetPixel(0, 0).ToArgb() == expected.ToArgb(), "combo uses the correct theme background");
+                    int textPixels = 0;
+                    for (int y = 2; y < bitmap.Height - 2; y++)
+                        for (int x = 3; x < bitmap.Width - 3; x++)
+                            if (bitmap.GetPixel(x, y).ToArgb() != expected.ToArgb()) textPixels++;
+                    Assert(textPixels > 10, "closed and highlighted combo selections render readable text");
+                }
+            }
+        }
+
+        private static object Field(object instance, string name)
+        {
+            return instance.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance).GetValue(instance);
         }
 
         private static void Assert(bool condition, string message)

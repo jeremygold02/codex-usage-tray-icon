@@ -72,6 +72,9 @@ namespace CodexUsageTray
                 EnableDpiAwareness();
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+#if WPF_UI
+                WpfBootstrap.Initialize();
+#endif
                 TrayAppContext context = new TrayAppContext(args);
                 RegisteredWaitHandle exitRegistration = ThreadPool.RegisterWaitForSingleObject(
                     exitSignal,

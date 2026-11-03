@@ -47,6 +47,7 @@ namespace CodexUsageTray.Tests
             foreach (UsageHistorySample sample in faster) sample.Weekly.UsedPercent *= 1.9;
             TestStoreAgreement(faster, latestTime, true);
             TestInactiveRoutine();
+            TestRoughInactiveAfterReset();
         }
 
         private static void TestStoreAgreement(List<UsageHistorySample> samples, DateTime latestTime, bool depletes)
@@ -162,6 +163,102 @@ namespace CodexUsageTray.Tests
                 projection = store.GetProjection(true, snapshot, firstAfterReset.TimestampUtc);
                 Assert(projection != null && projection.UsesInactiveHours,
                     "learned inactivity survives restart through retained usage readings");
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(path + ".imported")) File.Delete(path + ".imported");
+            }
+        }
+
+        private static void TestRoughInactiveAfterReset()
+        {
+            DateTime wednesday = DateTime.Now.Date;
+            while (wednesday.DayOfWeek != DayOfWeek.Wednesday || wednesday.AddHours(21) > DateTime.Now)
+                wednesday = wednesday.AddDays(-1);
+            DateTime latestTime = wednesday.AddHours(21).ToUniversalTime();
+            List<UsageHistorySample> samples = Routine(latestTime);
+            samples = samples.GetRange(samples.Count - 49, 49);
+            UsageHistorySample latest = samples[samples.Count - 1];
+            latest.Weekly.UsedPercent = 1;
+            latest.Weekly.ResetAtUtc = latestTime.AddHours(160);
+
+            UsagePatternForecast model = UsagePatternForecast.TryCreate(samples, 0);
+            Assert(model != null && model.UsesInactiveHours && !model.IsValidated,
+                "two observed quiet nights can guide a rough forecast without enough backtesting");
+            DateTime night = wednesday.AddDays(1).AddHours(2).ToUniversalTime();
+            DateTime morning = wednesday.AddDays(1).AddHours(10).ToUniversalTime();
+            Assert(UsagePatternForecast.Consumption(model.Rates, night, night.AddHours(1)) == 0 &&
+                UsagePatternForecast.Consumption(model.Rates, morning, morning.AddHours(1)) > 0,
+                "the rough forecast pauses at observed quiet hours and resumes at a learned working pace");
+            List<UsageHistorySample> oneDay = samples.GetRange(samples.Count - 25, 25);
+            UsagePatternForecast incomplete = UsagePatternForecast.TryCreate(oneDay, 0);
+            Assert(incomplete == null || !incomplete.UsesInactiveHours,
+                "one observed night does not establish a quiet routine");
+            List<UsageHistorySample> flat = new List<UsageHistorySample>();
+            foreach (UsageHistorySample sample in samples)
+            {
+                UsageHistorySample copy = sample.Clone();
+                copy.Weekly.UsedPercent = 0;
+                flat.Add(copy);
+            }
+            Assert(UsagePatternForecast.TryCreate(flat, 0) == null,
+                "a quiet routine alone does not invent a positive working pace");
+
+            List<UsageHistorySample> active = new List<UsageHistorySample>(samples);
+            for (int minute = 15; minute <= 30; minute += 15)
+            {
+                UsageHistorySample reading = latest.Clone();
+                reading.TimestampUtc = latestTime.AddMinutes(minute);
+                reading.Weekly.UsedPercent += minute / 30.0;
+                active.Add(reading);
+            }
+            UsagePatternForecast activeModel = UsagePatternForecast.TryCreate(active, 0);
+            Assert(activeModel != null && activeModel.UsesInactiveHours && activeModel.StartHourRate > 0,
+                "activity after a reset overrides a usual quiet hour");
+
+            string path = Path.Combine(Path.GetTempPath(), "RoughRoutineTest-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                AppSettings settings = new AppSettings();
+                UsageHistoryStore store = new UsageHistoryStore(path, settings);
+                List<UsageSnapshot> readings = new List<UsageSnapshot>();
+                foreach (UsageHistorySample sample in samples) readings.Add(Snapshot(sample));
+                store.Import(readings);
+                UsageSnapshot snapshot = Snapshot(latest);
+                UsageProjection projection = store.GetProjection(true, snapshot, latestTime);
+                Assert(projection != null && projection.UsesInactiveHours && !projection.UsesValidatedModel &&
+                    projection.Points.Count > 2 && projection.EndsAtReset,
+                    "a new cycle can use the rough routine with only one percent consumed");
+                Assert(store.GetForecast(true, snapshot, latestTime) == "Will last until reset",
+                    "rough projection and forecast text agree");
+
+                settings.QuietHoursMode = AppSettings.QuietHoursOff;
+                UsageProjection withoutQuiet = store.GetProjection(true, snapshot, latestTime);
+                Assert(withoutQuiet != null && !withoutQuiet.UsesInactiveHours,
+                    "disabling quiet hours removes the learned inactivity forecast");
+                settings.QuietHoursMode = AppSettings.QuietHoursAutomatic;
+                Assert(store.GetProjection(true, snapshot, latestTime).UsesInactiveHours,
+                    "reenabling quiet hours invalidates the cached forecast");
+                settings.ForecastMethod = AppSettings.ForecastRecentPace;
+                UsageProjection recent = store.GetProjection(true, snapshot, latestTime);
+                Assert(recent != null && recent.Points == null && !recent.UsesInactiveHours,
+                    "recent-pace mode uses the straight cycle pace");
+                settings.ForecastMethod = AppSettings.ForecastLearnedRoutine;
+                Assert(store.GetProjection(true, snapshot, latestTime).UsesInactiveHours,
+                    "switching back restores the learned routine");
+
+                latest.Weekly.UsedPercent = 99;
+                readings[readings.Count - 1] = Snapshot(latest);
+                store.Clear();
+                store.Import(readings, true);
+                snapshot = Snapshot(latest);
+                projection = store.GetProjection(true, snapshot, latestTime);
+                int seconds = (int)Math.Round((projection.EndUtc - latestTime).TotalSeconds, MidpointRounding.AwayFromZero);
+                string expected = "Estimated: " + TimeFormatter.FormatDateTime(projection.EndUtc.ToLocalTime()) +
+                    " (" + TimeFormatter.FormatDuration(seconds) + ")";
+                Assert(!projection.EndsAtReset && store.GetForecast(true, snapshot, latestTime) == expected,
+                    "rough depletion date matches the chart path");
             }
             finally
             {

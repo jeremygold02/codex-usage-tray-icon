@@ -1,6 +1,8 @@
 # Local build output
 *.exe
 *.bak
+bin/
+obj/
 
 # Local build scripts
 *.ps1

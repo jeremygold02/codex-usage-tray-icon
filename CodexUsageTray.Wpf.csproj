@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net481</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <StartupObject>CodexUsageTray.Program</StartupObject>
+    <AssemblyName>CodexUsageTray</AssemblyName>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
+    <LangVersion>latest</LangVersion>
+    <DefineConstants>$(DefineConstants);WPF_UI</DefineConstants>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="CodexUsageTray.cs" />
+    <Compile Include="src\*.cs" />
+    <Compile Include="wpf\**\*.cs" />
+    <Page Include="wpf\**\*.xaml" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="System.Web" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+  </ItemGroup>
+</Project>

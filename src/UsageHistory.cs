@@ -82,16 +82,23 @@ namespace CodexUsageTray
             public ImportCoverageAnchor() { }
         }
         private readonly string path;
+        private readonly AppSettings settings;
         private readonly List<UsageHistorySample> samples = new List<UsageHistorySample>();
         private UsagePatternForecast patternForecast;
         private DateTime patternTimestamp;
         private int patternSampleCount = -1;
         private double patternRate;
+        private bool patternAllowsInactiveHours;
         public bool ImportCompleted { get; private set; }
 
-        public UsageHistoryStore(string path)
+        public UsageHistoryStore(string path) : this(path, null)
+        {
+        }
+
+        public UsageHistoryStore(string path, AppSettings settings)
         {
             this.path = path;
+            this.settings = settings;
             bool loaded = Load();
             if (loaded)
             {
@@ -315,7 +322,7 @@ namespace CodexUsageTray
             if (weekly)
             {
                 UsageProjection pattern = GetProjection(true, snapshot, nowUtc);
-                if (pattern != null && pattern.UsesValidatedModel)
+                if (pattern != null && (pattern.UsesValidatedModel || pattern.UsesInactiveHours))
                     return pattern.EndsAtReset ? "Will last until reset" :
                         FormatEstimate(pattern.StartUtc, (pattern.EndUtc - pattern.StartUtc).TotalHours);
             }
@@ -350,7 +357,8 @@ namespace CodexUsageTray
                 TryGetCycleAverageRate(weekly, snapshot, periodSamples, out ratePerHour);
 
             double remaining = 100 - limit.UsedPercent;
-            if (weekly && periodSamples.Count > 0)
+            if (weekly && periodSamples.Count > 0 &&
+                (settings == null || settings.ForecastMethod != AppSettings.ForecastRecentPace))
             {
                 UsageHistorySample latest = periodSamples[periodSamples.Count - 1];
                 if (Math.Abs((latest.TimestampUtc - startUtc).TotalSeconds) <= 1 &&
@@ -377,12 +385,15 @@ namespace CodexUsageTray
         private UsagePatternForecast GetPatternForecast(List<UsageHistorySample> periodSamples, double ratePerHour)
         {
             DateTime timestamp = periodSamples[periodSamples.Count - 1].TimestampUtc;
-            if (patternSampleCount != periodSamples.Count || patternTimestamp != timestamp || patternRate != ratePerHour)
+            bool allowInactiveHours = settings == null || settings.QuietHoursMode != AppSettings.QuietHoursOff;
+            if (patternSampleCount != periodSamples.Count || patternTimestamp != timestamp ||
+                patternRate != ratePerHour || patternAllowsInactiveHours != allowInactiveHours)
             {
-                patternForecast = UsagePatternForecast.TryCreate(periodSamples, ratePerHour);
+                patternForecast = UsagePatternForecast.TryCreate(periodSamples, ratePerHour, allowInactiveHours);
                 patternTimestamp = timestamp;
                 patternSampleCount = periodSamples.Count;
                 patternRate = ratePerHour;
+                patternAllowsInactiveHours = allowInactiveHours;
             }
             return patternForecast;
         }

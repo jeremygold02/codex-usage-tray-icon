@@ -106,9 +106,9 @@ namespace CodexUsageTray
             dispatcher = new Control();
             dispatcher.CreateControl();
             settings = AppSettings.Load();
-            usageHistory = new UsageHistoryStore(UsageHistoryStore.DefaultPath);
+            usageHistory = new UsageHistoryStore(UsageHistoryStore.DefaultPath, settings);
             claudeHistory = new UsageHistoryStore(Path.Combine(
-                Path.GetDirectoryName(UsageHistoryStore.DefaultPath), "claude-usage-history.json"));
+                Path.GetDirectoryName(UsageHistoryStore.DefaultPath), "claude-usage-history.json"), settings);
             resetExpiryReminder = new ResetExpiryReminder(ResetExpiryReminder.DefaultPath);
             usagePopup = CreateUsagePopup();
 
@@ -1867,6 +1867,21 @@ namespace CodexUsageTray
 
             SetUpdateStatusText("Version " + info.LatestVersion + " available");
 
+#if WPF_UI
+            // The existing release updater replaces a single executable, whereas
+            // this build also needs matching WPF UI assemblies and configuration.
+            if (interactive)
+            {
+                MessageBox.Show(GetSettingsOwner(), info.Message + Environment.NewLine + Environment.NewLine +
+                    "This WPF build requires a matching set of files. Update it from a complete WPF build instead of installing the single-file release.",
+                    "Codex Usage Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                notifyIcon.ShowBalloonTip(5000, "Codex Usage Update",
+                    "A newer release is available. This WPF build requires a complete matching build to update.", ToolTipIcon.Info);
+            }
+#else
             if (!interactive)
             {
                 notifyIcon.ShowBalloonTip(
@@ -1902,6 +1917,7 @@ namespace CodexUsageTray
             {
                 OpenUrl(info.ReleaseUrl);
             }
+#endif
         }
 
         private void InstallUpdate(UpdateInfo info)

@@ -15,7 +15,15 @@ namespace CodexUsageTray
         private readonly HistoryChart chart;
         private readonly Label forecastLabel;
         private readonly Label detailLabel;
+        private readonly Label remainingValue;
+        private readonly Label resetValue;
+        private readonly Label summaryForecastValue;
+        private readonly Font bodyFont;
+        private readonly Font remainingFont;
         private readonly Timer displayTimer = new Timer();
+#if WPF_UI
+        private HistoryHeader historyHeader;
+#endif
         private AppSettings settings;
         private UsageSnapshot snapshot;
 
@@ -34,10 +42,16 @@ namespace CodexUsageTray
             this.history = history;
             this.settings = settings;
             Text = provider + " Usage History";
-            ClientSize = new Size(620, 420);
-            MinimumSize = new Size(490, 360);
+            ClientSize = new Size(760, 500);
+            MinimumSize = new Size(660, 420);
+#if WPF_UI
+            ClientSize = new Size(1000, 700);
+            MinimumSize = new Size(760, 540);
+#endif
             StartPosition = FormStartPosition.CenterScreen;
-            Font = SystemFonts.MessageBoxFont;
+            bodyFont = new Font(SystemFonts.MessageBoxFont.FontFamily,
+                Math.Max(10f, SystemFonts.MessageBoxFont.SizeInPoints));
+            Font = bodyFont;
             AutoScaleDimensions = new SizeF(96.0f, 96.0f);
             AutoScaleMode = AutoScaleMode.Dpi;
             try
@@ -50,19 +64,19 @@ namespace CodexUsageTray
 
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.Dock = DockStyle.Fill;
-            layout.Padding = new Padding(16, 12, 16, 12);
+            layout.Padding = new Padding(26, 18, 26, 18);
             layout.ColumnCount = 1;
             layout.RowCount = 4;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             FlowLayoutPanel tabs = new FlowLayoutPanel();
             tabs.AutoSize = true;
             tabs.Dock = DockStyle.Fill;
-            tabs.Margin = new Padding(0, 0, 0, 8);
+            tabs.Margin = new Padding(0, 0, 0, 16);
             weeklyButton = CreatePeriodButton("&Weekly", "Weekly limit: history since the latest reset");
             fiveHourButton = CreatePeriodButton("&5-hour", "Five-hour limit: history since the latest reset");
             tabs.Controls.Add(weeklyButton);
@@ -70,6 +84,36 @@ namespace CodexUsageTray
             weeklyButton.Checked = true;
             weeklyButton.CheckedChanged += PeriodChanged;
             fiveHourButton.CheckedChanged += PeriodChanged;
+
+            TableLayoutPanel summary = new TableLayoutPanel();
+            summary.Dock = DockStyle.Fill;
+            summary.AutoSize = true;
+            summary.Margin = new Padding(0, 0, 0, 16);
+            summary.ColumnCount = 3;
+            summary.RowCount = 1;
+            summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
+            summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+            summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46));
+            summary.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            remainingFont = new Font(Font.FontFamily, Math.Max(18f, Font.SizeInPoints * 1.8f), FontStyle.Bold);
+            remainingValue = CreateSummaryValue();
+            remainingValue.Font = remainingFont;
+            resetValue = CreateSummaryValue();
+            summaryForecastValue = CreateSummaryValue();
+            summary.Controls.Add(CreateSummaryBlock("Remaining", remainingValue, ""), 0, 0);
+            summary.Controls.Add(CreateSummaryBlock("Next reset", resetValue, "calendar"), 1, 0);
+            summary.Controls.Add(CreateSummaryBlock("Forecast", summaryForecastValue, "forecast"), 2, 0);
+            summary.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                int[] widths = summary.GetColumnWidths();
+                using (Pen divider = new Pen(DividerColor()))
+                {
+                    int x = widths[0] - 8;
+                    e.Graphics.DrawLine(divider, x, 2, x, summary.Height - 2);
+                    x += widths[1];
+                    e.Graphics.DrawLine(divider, x, 2, x, summary.Height - 2);
+                }
+            };
 
             chart = new HistoryChart();
             chart.Dock = DockStyle.Fill;
@@ -83,10 +127,46 @@ namespace CodexUsageTray
             forecastLabel = CreateLabel("");
             forecastLabel.AccessibleName = "Estimated usage remaining";
 
+            TableLayoutPanel footer = new TableLayoutPanel();
+            footer.Dock = DockStyle.Fill;
+            footer.AutoSize = true;
+            footer.ColumnCount = 2;
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52));
+            footer.Controls.Add(detailLabel, 0, 0);
+            footer.Controls.Add(forecastLabel, 1, 0);
+            forecastLabel.Margin = new Padding(16, 8, 0, 0);
+            footer.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                using (Pen divider = new Pen(DividerColor()))
+                    e.Graphics.DrawLine(divider, 0, 0, footer.Width, 0);
+            };
+
+#if WPF_UI
+            // Keep the original controls as the state source and retain their
+            // event wiring; the visible header presents that same live state.
+            tabs.Visible = false;
+            summary.Visible = false;
+            Controls.Add(tabs);
+            Controls.Add(summary);
+            historyHeader = new HistoryHeader();
+            historyHeader.PeriodChanged += delegate
+            {
+                if (historyHeader.IsWeekly) weeklyButton.Checked = true;
+                else if (snapshot != null && snapshot.FiveHour != null) fiveHourButton.Checked = true;
+            };
+            System.Windows.Forms.Integration.ElementHost headerHost = new System.Windows.Forms.Integration.ElementHost();
+            headerHost.Dock = DockStyle.Fill;
+            headerHost.Height = 142;
+            headerHost.Margin = new Padding(0, 0, 0, 12);
+            headerHost.Child = historyHeader;
+            layout.Controls.Add(headerHost, 0, 0);
+#else
             layout.Controls.Add(tabs, 0, 0);
-            layout.Controls.Add(chart, 0, 1);
-            layout.Controls.Add(detailLabel, 0, 2);
-            layout.Controls.Add(forecastLabel, 0, 3);
+            layout.Controls.Add(summary, 0, 1);
+#endif
+            layout.Controls.Add(chart, 0, 2);
+            layout.Controls.Add(footer, 0, 3);
             Controls.Add(layout);
             ApplySettings(settings);
             UpdateData(null);
@@ -113,8 +193,18 @@ namespace CodexUsageTray
             DateTime nowUtc = DateTime.UtcNow;
             bool weekly = weeklyButton.Checked;
             chart.UpdateData(history.Samples, weekly, nowUtc);
-            chart.UpdateProjection(history.GetProjection(weekly, snapshot, nowUtc));
+            chart.UpdateProjection(settings == null || settings.ShowProjectedUsage
+                ? history.GetProjection(weekly, snapshot, nowUtc) : null);
             forecastLabel.Text = history.GetForecast(weekly, snapshot, nowUtc);
+            summaryForecastValue.Text = forecastLabel.Text;
+            LimitWindow limit = snapshot == null ? null : (weekly ? snapshot.Weekly : snapshot.FiveHour);
+            remainingValue.Text = limit == null ? "\u2014" : limit.RemainingPercent.ToString(CultureInfo.CurrentCulture) + "%";
+            resetValue.Text = limit == null || !limit.ResetAfterSeconds.HasValue ? "\u2014" :
+                TimeFormatter.FormatResetDateTime(snapshot.LastUpdated.ToLocalTime(), limit.ResetAfterSeconds.Value);
+#if WPF_UI
+            if (historyHeader != null)
+                historyHeader.SetValues(weekly, hasFiveHourLimit, remainingValue.Text, resetValue.Text, summaryForecastValue.Text);
+#endif
         }
 
         public void ApplySettings(AppSettings value)
@@ -123,11 +213,25 @@ namespace CodexUsageTray
             bool highContrast = SystemInformation.HighContrast;
             bool dark = !highContrast && (settings == null || AppSettings.IsDarkTheme(settings.Theme));
             Color background = highContrast ? SystemColors.Window :
-                dark ? Color.FromArgb(54, 54, 54) : Color.FromArgb(245, 245, 245);
+                dark ? Color.FromArgb(19, 24, 31) : Color.FromArgb(248, 249, 251);
             Color foreground = highContrast ? SystemColors.WindowText : dark ? Color.White : Color.Black;
             ApplyControlColors(this, background, foreground);
+            WindowAppearance.ApplyTitleBar(this, dark);
             chart.ApplyTheme(dark);
+            chart.HighlightQuietHours = settings != null && settings.HighlightQuietHours;
+            UpdatePeriodButtonColors();
+#if WPF_UI
+            if (historyHeader != null) historyHeader.SetTheme(dark, highContrast);
+#endif
+            if (snapshot != null) UpdateData(snapshot);
             Invalidate(true);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            bool dark = !SystemInformation.HighContrast && (settings == null || AppSettings.IsDarkTheme(settings.Theme));
+            WindowAppearance.ApplyTitleBar(this, dark);
         }
 
         protected override void OnSystemColorsChanged(EventArgs e)
@@ -147,6 +251,11 @@ namespace CodexUsageTray
                 displayTimer.Dispose();
             }
             base.Dispose(disposing);
+            if (disposing)
+            {
+                remainingFont.Dispose();
+                bodyFont.Dispose();
+            }
         }
 
         protected override void OnVisibleChanged(EventArgs e)
@@ -177,6 +286,7 @@ namespace CodexUsageTray
             RadioButton selected = sender as RadioButton;
             if (chart != null && selected != null && selected.Checked)
             {
+                UpdatePeriodButtonColors();
                 UpdateData(snapshot);
             }
         }
@@ -190,12 +300,102 @@ namespace CodexUsageTray
 
         private static RadioButton CreatePeriodButton(string text, string accessibleName)
         {
-            RadioButton button = new RadioButton();
+            RadioButton button = new PeriodButton();
             button.Text = text;
             button.AccessibleName = accessibleName;
-            button.AutoSize = true;
-            button.Margin = new Padding(0, 0, 20, 0);
+            button.Appearance = Appearance.Button;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 1;
+            button.Size = new Size(104, 34);
+            button.TextAlign = ContentAlignment.MiddleCenter;
+            button.Margin = new Padding(0, 0, 2, 0);
             return button;
+        }
+
+        private void UpdatePeriodButtonColors()
+        {
+            bool highContrast = SystemInformation.HighContrast;
+            bool dark = !highContrast && (settings == null || AppSettings.IsDarkTheme(settings.Theme));
+            foreach (RadioButton button in new[] { weeklyButton, fiveHourButton })
+            {
+                button.BackColor = button.Checked ? (highContrast ? SystemColors.Highlight : Color.FromArgb(0, 105, 190)) :
+                    highContrast ? SystemColors.Window : dark ? Color.FromArgb(31, 38, 48) : Color.White;
+                button.ForeColor = button.Checked ? (highContrast ? SystemColors.HighlightText : Color.White) :
+                    highContrast ? SystemColors.WindowText : dark ? Color.White : Color.Black;
+                button.FlatAppearance.BorderColor = highContrast ? SystemColors.WindowText :
+                    dark ? Color.FromArgb(79, 91, 107) : Color.FromArgb(170, 178, 188);
+                button.FlatAppearance.CheckedBackColor = button.BackColor;
+                button.Invalidate();
+            }
+        }
+
+        private Color DividerColor()
+        {
+            return SystemInformation.HighContrast ? SystemColors.WindowText :
+                settings == null || AppSettings.IsDarkTheme(settings.Theme) ? Color.FromArgb(73, 82, 93) : Color.FromArgb(195, 201, 210);
+        }
+
+        private static Label CreateSummaryValue()
+        {
+            Label label = new Label();
+            label.Dock = DockStyle.Fill;
+            label.AutoEllipsis = false;
+            label.Margin = new Padding(0);
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            return label;
+        }
+
+        private Control CreateSummaryBlock(string caption, Label value, string icon)
+        {
+            TableLayoutPanel block = new TableLayoutPanel();
+            block.Dock = DockStyle.Fill;
+            block.AutoSize = true;
+            block.Margin = new Padding(0, 0, 12, 0);
+            block.ColumnCount = string.IsNullOrEmpty(icon) ? 1 : 2;
+            if (!string.IsNullOrEmpty(icon)) block.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32));
+            block.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            block.RowCount = 2;
+            block.RowStyles.Add(new RowStyle(SizeType.Absolute, Math.Max(19, Font.Height + 2)));
+            block.RowStyles.Add(new RowStyle(SizeType.Absolute, Math.Max(28, Math.Max(Font.Height * 2 + 4, value.Font.Height + 3))));
+            Label label = CreateLabel(caption);
+            label.Margin = Padding.Empty;
+            value.AccessibleName = caption;
+            int textColumn = 0;
+            if (!string.IsNullOrEmpty(icon))
+            {
+                SummaryIcon image = new SummaryIcon(icon);
+                image.Dock = DockStyle.Fill;
+                block.Controls.Add(image, 0, 0);
+                block.SetRowSpan(image, 2);
+                textColumn = 1;
+            }
+            block.Controls.Add(label, textColumn, 0);
+            block.Controls.Add(value, textColumn, 1);
+            bool updatingHeight = false;
+            EventHandler updateHeight = delegate
+            {
+                if (updatingHeight || label.Width <= 0 || value.Width <= 0) return;
+                TextFormatFlags flags = TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix;
+                int captionHeight = TextRenderer.MeasureText(label.Text, label.Font, new Size(label.Width, 32767), flags).Height + 2;
+                int valueHeight = TextRenderer.MeasureText(value.Text, value.Font, new Size(value.Width, 32767), flags).Height + 2;
+                captionHeight = Math.Max(19, captionHeight);
+                valueHeight = Math.Max(Math.Max(28, Font.Height * 2 + 4), valueHeight);
+                if ((int)block.RowStyles[0].Height == captionHeight && (int)block.RowStyles[1].Height == valueHeight) return;
+                updatingHeight = true;
+                try
+                {
+                    block.RowStyles[0].Height = captionHeight;
+                    block.RowStyles[1].Height = valueHeight;
+                }
+                finally { updatingHeight = false; }
+            };
+            label.TextChanged += updateHeight;
+            label.FontChanged += updateHeight;
+            label.SizeChanged += updateHeight;
+            value.TextChanged += updateHeight;
+            value.FontChanged += updateHeight;
+            value.SizeChanged += updateHeight;
+            return block;
         }
 
         private static Label CreateLabel(string text)
@@ -219,6 +419,102 @@ namespace CodexUsageTray
             }
         }
 
+        private static GraphicsPath RoundedRectangle(RectangleF bounds, float radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            float diameter = Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height));
+            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private sealed class PeriodButton : RadioButton
+        {
+            public PeriodButton()
+            {
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                if (SystemInformation.HighContrast)
+                {
+                    base.OnPaint(e);
+                    return;
+                }
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                RectangleF bounds = new RectangleF(0.5f, 0.5f, Math.Max(1, Width - 1f), Math.Max(1, Height - 1f));
+                using (GraphicsPath path = RoundedRectangle(bounds, 6 * e.Graphics.DpiX / 96f))
+                using (Brush fill = new SolidBrush(BackColor))
+                using (Pen border = new Pen(FlatAppearance.BorderColor))
+                {
+                    e.Graphics.FillPath(fill, path);
+                    e.Graphics.DrawPath(border, path);
+                }
+                TextFormatFlags flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+                if (!ShowKeyboardCues) flags |= TextFormatFlags.HidePrefix;
+                TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, flags);
+                if (Focused && ShowFocusCues)
+                    ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -4, -4), ForeColor, BackColor);
+            }
+
+            protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+            protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+        }
+
+        private sealed class SummaryIcon : Control
+        {
+            private readonly string kind;
+
+            public SummaryIcon(string kind)
+            {
+                this.kind = kind;
+                TabStop = false;
+                AccessibleRole = AccessibleRole.None;
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                    ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                bool dark = BackColor.GetBrightness() < 0.5f;
+                Color accent = SystemInformation.HighContrast ? SystemColors.WindowText :
+                    kind == "calendar" ? (dark ? Color.FromArgb(87, 185, 247) : Color.FromArgb(0, 104, 180)) :
+                    (dark ? Color.FromArgb(242, 178, 77) : Color.FromArgb(160, 89, 0));
+                float scale = Math.Min(Width / 32f, Height / 32f);
+                float x = Math.Max(0, (Width - 23 * scale) / 2f - 2 * scale);
+                float y = (Height - 23 * scale) / 2f;
+                using (Pen pen = new Pen(accent, Math.Max(1.4f, 1.7f * scale)))
+                {
+                    pen.StartCap = LineCap.Round;
+                    pen.EndCap = LineCap.Round;
+                    pen.LineJoin = LineJoin.Round;
+                    if (kind == "calendar")
+                    {
+                        e.Graphics.DrawRectangle(pen, x + 2 * scale, y + 5 * scale, 18 * scale, 16 * scale);
+                        e.Graphics.DrawLine(pen, x + 2 * scale, y + 10 * scale, x + 20 * scale, y + 10 * scale);
+                        e.Graphics.DrawLine(pen, x + 6 * scale, y + 2 * scale, x + 6 * scale, y + 7 * scale);
+                        e.Graphics.DrawLine(pen, x + 16 * scale, y + 2 * scale, x + 16 * scale, y + 7 * scale);
+                    }
+                    else
+                    {
+                        e.Graphics.DrawLines(pen, new[] { new PointF(x + 2 * scale, y + 17 * scale),
+                            new PointF(x + 8 * scale, y + 11 * scale), new PointF(x + 12 * scale, y + 14 * scale),
+                            new PointF(x + 20 * scale, y + 5 * scale) });
+                        e.Graphics.DrawLine(pen, x + 15 * scale, y + 5 * scale, x + 20 * scale, y + 5 * scale);
+                        e.Graphics.DrawLine(pen, x + 20 * scale, y + 5 * scale, x + 20 * scale, y + 10 * scale);
+                    }
+                }
+            }
+        }
+
         private sealed class HistoryChart : Control
         {
             private readonly List<UsageHistorySample> samples = new List<UsageHistorySample>();
@@ -231,6 +527,8 @@ namespace CodexUsageTray
             private int selectedIndex = -1;
             private DateTime? selectedProjectionUtc;
             private RectangleF plot;
+
+            public bool HighlightQuietHours { get; set; }
 
             public event EventHandler SelectionChanged;
             public string SelectedDetail { get; private set; }
@@ -368,7 +666,7 @@ namespace CodexUsageTray
                 Color muted = SystemInformation.HighContrast ? SystemColors.WindowText :
                     dark ? Color.Gainsboro : Color.FromArgb(72, 72, 72);
                 Color grid = SystemInformation.HighContrast ? SystemColors.WindowText :
-                    dark ? Color.FromArgb(90, 90, 90) : Color.FromArgb(195, 195, 195);
+                    dark ? Color.FromArgb(65, 74, 86) : Color.FromArgb(195, 201, 210);
                 Color line = SystemInformation.HighContrast ? SystemColors.Highlight :
                     dark ? Color.FromArgb(100, 195, 255) : Color.FromArgb(0, 104, 180);
                 Color projectionColor = SystemInformation.HighContrast ? SystemColors.WindowText :
@@ -379,6 +677,49 @@ namespace CodexUsageTray
                     PointF projectedStart = GetChartPoint(projection.StartUtc, projection.StartRemainingPercent);
                     using (Brush tint = new SolidBrush(Color.FromArgb(18, projectionColor)))
                         graphics.FillRectangle(tint, projectedStart.X, plot.Top, Math.Max(0, plot.Right - projectedStart.X), plot.Height);
+                    if (HighlightQuietHours && projection.UsesInactiveHours && HasProjectedConsumption(projection.Points))
+                    {
+                        UsageProjectionPoint previous = null;
+                        using (Brush quiet = new SolidBrush(Color.FromArgb(24, line)))
+                        foreach (UsageProjectionPoint point in projection.Points)
+                        {
+                            if (previous != null && previous.RemainingPercent > 0 &&
+                                Math.Abs(previous.RemainingPercent - point.RemainingPercent) < 0.000001 &&
+                                point.TimestampUtc > previous.TimestampUtc)
+                            {
+                                float left = Math.Max(plot.Left, GetChartPoint(previous.TimestampUtc, 0).X);
+                                float right = Math.Min(plot.Right, GetChartPoint(point.TimestampUtc, 0).X);
+                                if (right > left) graphics.FillRectangle(quiet, left, plot.Top, right - left, plot.Height);
+                            }
+                            previous = point;
+                        }
+                    }
+                    float recordedLeft = plot.Left + 25 * scale;
+                    float recordedWidth = projectedStart.X - recordedLeft - 24 * scale;
+                    if (recordedWidth > 55 * scale)
+                        TextRenderer.DrawText(graphics, "Recorded", Font,
+                            Rectangle.Round(new RectangleF(recordedLeft, 0, recordedWidth, labelHeight)), line,
+                            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
+                            TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
+                    if (projectedStart.X > plot.Left + 115 * scale && projectedStart.X < plot.Right - 115 * scale)
+                    {
+                        Rectangle markerBounds = Rectangle.Round(new RectangleF(projectedStart.X - 20 * scale, 0,
+                            40 * scale, labelHeight));
+                        using (GraphicsPath markerPath = RoundedRectangle(markerBounds, 5 * scale))
+                        using (Brush marker = new SolidBrush(SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(0, 112, 205)))
+                        using (Pen markerBorder = new Pen(SystemInformation.HighContrast ? SystemColors.HighlightText : Color.FromArgb(87, 185, 247)))
+                        {
+                            graphics.FillPath(marker, markerPath);
+                            graphics.DrawPath(markerBorder, markerPath);
+                            graphics.FillPolygon(marker, new[] { new PointF(projectedStart.X - 4 * scale, markerBounds.Bottom - 1),
+                                new PointF(projectedStart.X + 4 * scale, markerBounds.Bottom - 1),
+                                new PointF(projectedStart.X, plot.Top) });
+                        }
+                        TextRenderer.DrawText(graphics, "Now", Font, markerBounds,
+                            SystemInformation.HighContrast ? SystemColors.HighlightText : Color.White,
+                            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
+                            TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
+                    }
                     DrawText(graphics, "Projected", new RectangleF(plot.Right - 100 * scale, 0, 100 * scale, labelHeight), projectionColor, true);
                 }
 
@@ -433,22 +774,27 @@ namespace CodexUsageTray
                 {
                     PointF projectedStart = GetChartPoint(projection.StartUtc, projection.StartRemainingPercent);
                     PointF projectedEnd = GetChartPoint(projection.EndUtc, projection.EndRemainingPercent);
+                    using (Pen nowPen = new Pen(line, Math.Max(1, scale)))
+                    using (Brush marker = new SolidBrush(line))
+                    {
+                        graphics.DrawLine(nowPen, projectedStart.X, plot.Top, projectedStart.X, plot.Bottom);
+                        graphics.FillEllipse(marker, projectedStart.X - 5 * scale, projectedStart.Y - 5 * scale, 10 * scale, 10 * scale);
+                        using (Pen outline = new Pen(SystemInformation.HighContrast ? SystemColors.WindowText : Color.White, Math.Max(1, scale)))
+                            graphics.DrawEllipse(outline, projectedStart.X - 5 * scale, projectedStart.Y - 5 * scale, 10 * scale, 10 * scale);
+                    }
                     using (Pen projectionPen = new Pen(projectionColor, Math.Max(1.5f, 2 * scale)))
                     {
                         projectionPen.DashStyle = DashStyle.Dash;
-                        PointF previous = projectedStart;
+                        List<PointF> projectedPoints = new List<PointF> { projectedStart };
                         if (projection.Points != null)
                         {
                             foreach (UsageProjectionPoint point in projection.Points)
-                            {
-                                PointF next = GetChartPoint(point.TimestampUtc, point.RemainingPercent);
-                                graphics.DrawLine(projectionPen, previous, next);
-                                previous = next;
-                            }
+                                projectedPoints.Add(GetChartPoint(point.TimestampUtc, point.RemainingPercent));
                         }
-                        else graphics.DrawLine(projectionPen, projectedStart, projectedEnd);
+                        else projectedPoints.Add(projectedEnd);
                         if (projection.EndRemainingPercent <= 0 && endUtc > projection.EndUtc)
-                            graphics.DrawLine(projectionPen, projectedEnd, GetChartPoint(endUtc, 0));
+                            projectedPoints.Add(GetChartPoint(endUtc, 0));
+                        if (projectedPoints.Count > 1) graphics.DrawLines(projectionPen, projectedPoints.ToArray());
                         projectionPen.DashStyle = DashStyle.Solid;
                         graphics.DrawEllipse(projectionPen, projectedEnd.X - 3 * scale, projectedEnd.Y - 3 * scale, 6 * scale, 6 * scale);
                         if (selectedProjectionUtc.HasValue)
@@ -622,6 +968,14 @@ namespace CodexUsageTray
                 if (index > 0 && UsageHistoryStore.IsReset(samples[index - 1], sample, weekly))
                     detail += "  |  Reset or adjustment";
                 return detail;
+            }
+
+            private static bool HasProjectedConsumption(List<UsageProjectionPoint> points)
+            {
+                if (points == null) return false;
+                for (int i = 1; i < points.Count; i++)
+                    if (points[i - 1].RemainingPercent - points[i].RemainingPercent > 0.000001) return true;
+                return false;
             }
 
             private void SelectSample(int index)

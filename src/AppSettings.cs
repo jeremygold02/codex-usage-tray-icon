@@ -9,7 +9,7 @@ namespace CodexUsageTray
 {
     internal sealed class AppSettings
     {
-        public const int CurrentSettingsVersion = 8;
+        public const int CurrentSettingsVersion = 9;
         public const string DefaultTrayBoxColor = "#0078D7";
         public const string DefaultTrayTextColor = "#FFFFFF";
         public const string IconMetricWeekly = "Weekly";
@@ -18,6 +18,10 @@ namespace CodexUsageTray
         public const string ThemeSystem = "System Default";
         public const string ThemeDark = "Dark Mode";
         public const string ThemeLight = "Light Mode";
+        public const string ForecastLearnedRoutine = "LearnedRoutine";
+        public const string ForecastRecentPace = "RecentPace";
+        public const string QuietHoursAutomatic = "Automatic";
+        public const string QuietHoursOff = "Off";
 
         private bool saveBlockedByNewerVersion;
         private int protectedSettingsVersion;
@@ -53,6 +57,10 @@ namespace CodexUsageTray
         public string TrayBoxColor { get; set; }
         public string TrayTextColor { get; set; }
         public string Theme { get; set; }
+        public string ForecastMethod { get; set; }
+        public string QuietHoursMode { get; set; }
+        public bool ShowProjectedUsage { get; set; }
+        public bool HighlightQuietHours { get; set; }
         public string AutoRedeemCreditId { get; set; }
         public string AutoRedeemIdempotencyKey { get; set; }
         public string AutoRedeemAttemptStatus { get; set; }
@@ -95,6 +103,10 @@ namespace CodexUsageTray
             TrayBoxColor = DefaultTrayBoxColor;
             TrayTextColor = DefaultTrayTextColor;
             Theme = ThemeSystem;
+            ForecastMethod = ForecastLearnedRoutine;
+            QuietHoursMode = QuietHoursAutomatic;
+            ShowProjectedUsage = true;
+            HighlightQuietHours = false;
         }
 
         internal AppSettings Clone()
@@ -131,6 +143,10 @@ namespace CodexUsageTray
             TrayBoxColor = source.TrayBoxColor;
             TrayTextColor = source.TrayTextColor;
             Theme = source.Theme;
+            ForecastMethod = source.ForecastMethod;
+            QuietHoursMode = source.QuietHoursMode;
+            ShowProjectedUsage = source.ShowProjectedUsage;
+            HighlightQuietHours = source.HighlightQuietHours;
             AutoRedeemCreditId = source.AutoRedeemCreditId;
             AutoRedeemIdempotencyKey = source.AutoRedeemIdempotencyKey;
             AutoRedeemAttemptStatus = source.AutoRedeemAttemptStatus;
@@ -399,6 +415,17 @@ namespace CodexUsageTray
                 ResetExpiryReminders = true;
                 ResetExpiryLeadHours = 24;
             }
+            if (sourceVersion < 9)
+            {
+                ForecastMethod = ForecastLearnedRoutine;
+                QuietHoursMode = QuietHoursAutomatic;
+                ShowProjectedUsage = true;
+                HighlightQuietHours = false;
+            }
+            ForecastMethod = string.Equals(ForecastMethod, ForecastRecentPace, StringComparison.OrdinalIgnoreCase)
+                ? ForecastRecentPace : ForecastLearnedRoutine;
+            QuietHoursMode = string.Equals(QuietHoursMode, QuietHoursOff, StringComparison.OrdinalIgnoreCase)
+                ? QuietHoursOff : QuietHoursAutomatic;
             if (ResetExpiryLeadHours < 1 || ResetExpiryLeadHours > 72)
             {
                 ResetExpiryLeadHours = 24;

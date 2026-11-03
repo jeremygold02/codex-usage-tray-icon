@@ -26,19 +26,41 @@ namespace CodexUsageTray
         public bool UsesInactiveHours;
         public double? StartHourRate;
 
-        public static UsagePatternForecast TryCreate(List<UsageHistorySample> samples, double currentRate)
+        public static UsagePatternForecast TryCreate(List<UsageHistorySample> samples, double currentRate,
+            bool allowInactiveHours = true)
         {
-            UsagePatternForecast candidate = Evaluate(samples, currentRate);
+            UsagePatternForecast candidate = Evaluate(samples, currentRate, allowInactiveHours);
+            if (candidate != null && candidate.IsValidated &&
+                (candidate.UsesDailyPattern || candidate.UsesInactiveHours)) return candidate;
+
+            // Keep observed quiet hours as a rough guide even when backtesting
+            // favors a constant pace or there are too few validation checks.
+            if (allowInactiveHours && samples.Count >= 3)
+            {
+                double[] inactive = InactiveProfile(BuildHours(samples), samples, currentRate);
+                if (inactive != null && Array.Exists(inactive, delegate(double rate) { return rate > 0; }))
+                {
+                    return new UsagePatternForecast
+                    {
+                        Rates = inactive,
+                        UsesInactiveHours = true,
+                        UsesSessionPace = true,
+                        StartHourRate = IsCurrentlyActive(samples)
+                            ? (double?)RecentActiveRate(samples, currentRate) : null
+                    };
+                }
+            }
             return candidate != null && candidate.IsValidated ? candidate : null;
         }
 
-        internal static UsagePatternForecast Evaluate(List<UsageHistorySample> samples, double currentRate)
+        internal static UsagePatternForecast Evaluate(List<UsageHistorySample> samples, double currentRate,
+            bool allowInactiveHours = true)
         {
             if (samples.Count < 3) return null;
             UsageHistorySample latest = samples[samples.Count - 1];
             Dictionary<DateTime, Hour> hours = BuildHours(samples);
             double[] currentProfile = Profile(hours, latest.TimestampUtc, currentRate);
-            double[] currentInactiveProfile = InactiveProfile(hours, samples, currentRate);
+            double[] currentInactiveProfile = allowInactiveHours ? InactiveProfile(hours, samples, currentRate) : null;
             double? currentStartRate = currentInactiveProfile != null && IsCurrentlyActive(samples)
                 ? (double?)RecentActiveRate(samples, currentRate) : null;
 
@@ -75,7 +97,7 @@ namespace CodexUsageTray
                 double dailyRate = DailyRate(training, rate);
                 double sessionRate;
                 if (!UsageHistoryStore.TryGetSessionRate(snapshot, training, out sessionRate)) sessionRate = rate;
-                double[] inactiveProfile = InactiveProfile(trainingHours, training, sessionRate);
+                double[] inactiveProfile = allowInactiveHours ? InactiveProfile(trainingHours, training, sessionRate) : null;
                 double? startRate = inactiveProfile != null && IsCurrentlyActive(training)
                     ? (double?)RecentActiveRate(training, sessionRate) : null;
                 nextOrigin = origin.TimestampUtc.AddHours(3);
@@ -386,7 +408,7 @@ namespace CodexUsageTray
             {
                 StartUtc = start, StartRemainingPercent = remaining,
                 Points = new List<UsageProjectionPoint>(), UsesDailyPattern = UsesDailyPattern,
-                UsesSessionPace = UsesSessionPace, UsesInactiveHours = UsesInactiveHours, UsesValidatedModel = true
+                UsesSessionPace = UsesSessionPace, UsesInactiveHours = UsesInactiveHours, UsesValidatedModel = IsValidated
             };
             projection.Points.Add(new UsageProjectionPoint { TimestampUtc = start, RemainingPercent = remaining });
             DateTime cursor = start;

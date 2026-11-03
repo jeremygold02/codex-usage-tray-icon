@@ -48,6 +48,165 @@ namespace CodexUsageTray.Tests
                 TestPlateauInspection(chart, form, now);
                 TestProjectionThroughReset(chart, form);
                 TestAxisTicks(chart);
+                TestQuietHourHighlight(chart, now);
+            }
+            TestProjectionVisibility();
+            TestSummaryTextLayout();
+        }
+
+        private static void TestSummaryTextLayout()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "SummaryLayout-" + Guid.NewGuid().ToString("N") + ".json");
+            using (UsageHistoryForm form = new UsageHistoryForm(new UsageHistoryStore(path), new AppSettings()))
+            using (Font enlarged = new Font(form.Font.FontFamily, 14))
+            {
+                form.Size = form.MinimumSize;
+                form.Font = enlarged;
+                Label reset = (Label)typeof(UsageHistoryForm).GetField("resetValue", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+                Label estimate = (Label)typeof(UsageHistoryForm).GetField("summaryForecastValue", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+                reset.Text = "Mittwoch, 30. Dezember 2027 um 23:59 Uhr";
+                estimate.Text = "Geschätztes Ende: Mittwoch, 30. Dezember 2027 um 23:59 Uhr (6 Tage 12 Stunden)";
+                form.CreateControl();
+                LayoutChildren(form);
+                using (Bitmap bitmap = new Bitmap(form.Width, form.Height))
+                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                LayoutChildren(form);
+                Assert(!form.Visible, "summary layout test never shows the window");
+                foreach (Label label in new[] { reset, estimate })
+                {
+                    Size measured = TextRenderer.MeasureText(label.Text, label.Font, new Size(label.Width, 32767),
+                        TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
+                    Assert(label.Height >= measured.Height, "summary value fits its enlarged, wrapped text without clipping");
+                }
+                Control chart = (Control)typeof(UsageHistoryForm).GetField("chart", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+                TableLayoutPanel main = (TableLayoutPanel)chart.Parent;
+                Control summary = main.GetControlFromPosition(0, 1);
+                Control footer = main.GetControlFromPosition(0, 3);
+                Assert(summary.Bottom <= chart.Top && chart.Bottom <= footer.Top && chart.Height > 0,
+                    "expanded summary, plot, and footer do not overlap");
+                int expandedHeight = summary.Height;
+                form.Width += 250;
+                LayoutChildren(form);
+                Assert(summary.Height < expandedHeight, "summary becomes shorter when a wider window permits fewer wrapped lines");
+                form.Size = form.MinimumSize;
+                LayoutChildren(form);
+                foreach (Label label in new[] { reset, estimate })
+                {
+                    Size measured = TextRenderer.MeasureText(label.Text, label.Font, new Size(label.Width, 32767),
+                        TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix);
+                    Assert(label.Height >= measured.Height, "summary expands again when the window is narrowed");
+                }
+                estimate.Text = "Will last until reset";
+                reset.Text = "Nov 6, 1:30 PM";
+                LayoutChildren(form);
+                Assert(summary.Height < expandedHeight && summary.Bottom <= chart.Top,
+                    "the summary returns to a compact height when text becomes short");
+            }
+        }
+
+        private static void LayoutChildren(Control control)
+        {
+            control.PerformLayout();
+            foreach (Control child in control.Controls) LayoutChildren(child);
+        }
+
+        private static void TestProjectionVisibility()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "ChartSettings-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                UsageHistoryStore store = new UsageHistoryStore(path);
+                DateTime latestTime = DateTime.UtcNow.AddSeconds(-2);
+                DateTime reset = latestTime.AddDays(3);
+                UsageSnapshot latest = null;
+                foreach (int hours in new[] { -12, -6, 0 })
+                {
+                    DateTime at = latestTime.AddHours(hours);
+                    latest = new UsageSnapshot
+                    {
+                        LastUpdated = at,
+                        Weekly = new LimitWindow { UsedPercent = 20 + hours / 2.0, WindowMinutes = 10080,
+                            ResetAfterSeconds = (int)(reset - at).TotalSeconds }
+                    };
+                    store.Observe(latest);
+                }
+                AppSettings settings = new AppSettings();
+                using (UsageHistoryForm form = new UsageHistoryForm(store, settings))
+                {
+                    form.UpdateData(latest);
+                    Control chart = (Control)typeof(UsageHistoryForm).GetField("chart", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+                    FieldInfo projected = chart.GetType().GetField("projection", BindingFlags.Instance | BindingFlags.NonPublic);
+                    Assert(projected.GetValue(chart) != null, "the chart initially displays an available forecast");
+                    settings.ShowProjectedUsage = false;
+                    form.ApplySettings(settings);
+                    Assert(projected.GetValue(chart) == null, "disabling projections immediately removes the projected path");
+                    Label forecast = (Label)typeof(UsageHistoryForm).GetField("forecastLabel", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+                    Assert(!string.IsNullOrEmpty(forecast.Text), "hiding the chart projection preserves the forecast summary");
+                    settings.ShowProjectedUsage = true;
+                    form.ApplySettings(settings);
+                    Assert(projected.GetValue(chart) != null, "reenabling projections restores the path without reopening the window");
+                }
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        }
+
+        private static void TestQuietHourHighlight(Control chart, DateTime now)
+        {
+            List<UsageHistorySample> readings = new List<UsageHistorySample>
+            {
+                Sample(now.AddHours(-2), 20), Sample(now, 30)
+            };
+            foreach (UsageHistorySample reading in readings) reading.Weekly.ResetAtUtc = now.AddHours(4);
+            Update(chart, readings, true, now);
+            UsageProjection projection = new UsageProjection
+            {
+                StartUtc = now, EndUtc = now.AddHours(4), StartRemainingPercent = 70, EndRemainingPercent = 60,
+                UsesInactiveHours = true,
+                Points = new List<UsageProjectionPoint>
+                {
+                    new UsageProjectionPoint { TimestampUtc = now, RemainingPercent = 70 },
+                    new UsageProjectionPoint { TimestampUtc = now.AddHours(1), RemainingPercent = 70 },
+                    new UsageProjectionPoint { TimestampUtc = now.AddHours(4), RemainingPercent = 60 }
+                }
+            };
+            chart.GetType().GetMethod("UpdateProjection").Invoke(chart, new object[] { projection });
+            chart.Size = new Size(600, 280);
+            PropertyInfo highlight = chart.GetType().GetProperty("HighlightQuietHours");
+            using (Bitmap normal = new Bitmap(chart.Width, chart.Height))
+            using (Bitmap highlighted = new Bitmap(chart.Width, chart.Height))
+            {
+                highlight.SetValue(chart, false, null);
+                chart.DrawToBitmap(normal, new Rectangle(Point.Empty, normal.Size));
+                RectangleF plot = (RectangleF)chart.GetType().GetField("plot", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(chart);
+                highlight.SetValue(chart, true, null);
+                chart.DrawToBitmap(highlighted, new Rectangle(Point.Empty, highlighted.Size));
+                int quietX = (int)(plot.Left + plot.Width * 2.5 / 6);
+                int activeX = (int)(plot.Left + plot.Width * 4 / 6);
+                int y = (int)plot.Top + 8;
+                Assert(normal.GetPixel(quietX, y) != highlighted.GetPixel(quietX, y) &&
+                    normal.GetPixel(activeX, y) == highlighted.GetPixel(activeX, y),
+                    "highlighting affects learned quiet periods only");
+                projection.UsesInactiveHours = false;
+                chart.DrawToBitmap(highlighted, new Rectangle(Point.Empty, highlighted.Size));
+                Assert(normal.GetPixel(quietX, y) == highlighted.GetPixel(quietX, y),
+                    "a flat line from a non-inactivity model is not presented as a learned quiet period");
+                projection.UsesInactiveHours = true;
+                foreach (UsageProjectionPoint point in projection.Points) point.RemainingPercent = 70;
+                highlight.SetValue(chart, false, null);
+                chart.DrawToBitmap(normal, new Rectangle(Point.Empty, normal.Size));
+                highlight.SetValue(chart, true, null);
+                chart.DrawToBitmap(highlighted, new Rectangle(Point.Empty, highlighted.Size));
+                Assert(normal.GetPixel(quietX, y) == highlighted.GetPixel(quietX, y),
+                    "a zero usage baseline does not invent learned quiet hours");
+                projection.Points[1].RemainingPercent = 0;
+                projection.Points[2].RemainingPercent = 0;
+                projection.EndRemainingPercent = 0;
+                highlight.SetValue(chart, false, null);
+                chart.DrawToBitmap(normal, new Rectangle(Point.Empty, normal.Size));
+                highlight.SetValue(chart, true, null);
+                chart.DrawToBitmap(highlighted, new Rectangle(Point.Empty, highlighted.Size));
+                Assert(normal.GetPixel(activeX, y) == highlighted.GetPixel(activeX, y),
+                    "the exhausted allowance plateau is not highlighted as a quiet period");
             }
         }
 
