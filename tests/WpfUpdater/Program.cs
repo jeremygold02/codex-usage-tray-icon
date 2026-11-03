@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace CodexUsageTray
 {
@@ -298,6 +299,13 @@ namespace CodexUsageTray
             {
                 string script = File.ReadAllText(preparation.ScriptPath);
                 Check(script.Contains("CodexUsageTray.Test."), "synthetic updater uses an isolated mutex");
+                if (!shouldRollback)
+                {
+                    // Simulate Windows hosts where the optional Get-FileHash command
+                    // is unavailable. The updater must still verify staged files.
+                    script = "function Get-FileHash { throw 'Get-FileHash is unavailable in this test.' }\r\n" + script;
+                    File.WriteAllText(preparation.ScriptPath, script, new UTF8Encoding(false));
+                }
                 int exitCode = RunPowerShell(preparation.ScriptPath);
                 Check(exitCode == (shouldRollback ? 1 : 0), name + " updater exit status: " + exitCode);
                 Check(File.ReadAllText(Path.Combine(env.App, "user-note.txt")) == "keep", name + " preserves unrelated file");
@@ -404,18 +412,22 @@ namespace CodexUsageTray
             info.RedirectStandardOutput = true;
             info.RedirectStandardError = true;
             var captured = new StringBuilder();
+            var stdoutDone = new TaskCompletionSource<bool>();
+            var stderrDone = new TaskCompletionSource<bool>();
             using (var child = new Process())
             {
                 child.StartInfo = info;
-                child.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) lock (captured) captured.AppendLine(e.Data); };
-                child.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) lock (captured) captured.AppendLine(e.Data); };
+                child.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) { lock (captured) captured.AppendLine(e.Data); } else stdoutDone.TrySetResult(true); };
+                child.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) { lock (captured) captured.AppendLine(e.Data); } else stderrDone.TrySetResult(true); };
                 lastProcessDiagnostics = "";
                 if (!child.Start()) throw new InvalidOperationException("Synthetic updater process could not start.");
                 child.BeginOutputReadLine();
                 child.BeginErrorReadLine();
                 if (!child.WaitForExit(30000)) throw new TimeoutException("Synthetic updater process did not finish.");
-                // Drain asynchronous readers so the logs survive ephemeral CI runners.
-                child.WaitForExit();
+                // Allow readers to finish, but never wait indefinitely if a spawned
+                // synthetic app inherited a redirected handle.
+                stdoutDone.Task.Wait(1000);
+                stderrDone.Task.Wait(1000);
                 lock (captured) lastProcessDiagnostics = captured.ToString();
                 return child.ExitCode;
             }
