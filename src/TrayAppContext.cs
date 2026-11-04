@@ -18,6 +18,7 @@ namespace CodexUsageTray
     internal sealed class TrayAppContext : ApplicationContext
     {
         private const int ActivityPollSeconds = 30;
+        private const int UpdateCheckIntervalMilliseconds = 60 * 60 * 1000;
         private const int AutoRedemptionRetrySeconds = 60;
         private const int AutoRedemptionBusyRetrySeconds = 5;
         private const int AutoRedemptionResetNotificationSuppressionMinutes = 30;
@@ -39,6 +40,7 @@ namespace CodexUsageTray
         private readonly System.Windows.Forms.Timer refreshTimer;
         private readonly System.Windows.Forms.Timer autoRedemptionTimer;
         private readonly System.Windows.Forms.Timer activityTimer;
+        private readonly System.Windows.Forms.Timer updateTimer;
         private readonly System.Windows.Forms.Timer resetReminderTimer;
         private readonly ResetExpiryReminder resetExpiryReminder;
         private readonly UsageHistoryStore usageHistory;
@@ -53,6 +55,7 @@ namespace CodexUsageTray
         private readonly UsageResetNotificationSuppression usageResetNotificationSuppression;
         private readonly bool showUsageOnStart;
         private readonly bool showSettingsOnStart;
+        private readonly bool suppressAutomaticUpdates;
 
         private UsagePopup usagePopup;
         private Icon currentIcon;
@@ -69,6 +72,8 @@ namespace CodexUsageTray
         private bool refreshAfterAutoRedemption;
         private bool updateCheckInProgress;
         private bool updateInstallInProgress;
+        private PreparedUpdate pendingUpdate;
+        private bool pendingUpdateInteractive;
         private volatile bool shuttingDown;
         private string updateStatusText = "";
         private string lastAutoRedemptionError;
@@ -97,6 +102,7 @@ namespace CodexUsageTray
         {
             showUsageOnStart = HasArg(args, "--show-usage");
             showSettingsOnStart = HasArg(args, "--show-settings");
+            suppressAutomaticUpdates = HasArg(args, "--update-failed");
             refreshClock = Stopwatch.StartNew();
             shutdownCancellation = new CancellationTokenSource();
             usageResetDetector = new UsageResetDetector();
@@ -163,6 +169,11 @@ namespace CodexUsageTray
             activityTimer.Interval = ActivityPollSeconds * 1000;
             activityTimer.Tick += delegate { PollCodexActivity(); RefreshClaudeUsage(); };
             activityTimer.Start();
+
+            updateTimer = new System.Windows.Forms.Timer();
+            updateTimer.Interval = UpdateCheckIntervalMilliseconds;
+            updateTimer.Tick += delegate { CheckForUpdates(false); };
+            updateTimer.Start();
 
             RefreshClaudeUsage();
             RefreshUsageIfDue(false);
@@ -1649,6 +1660,15 @@ namespace CodexUsageTray
 
             settingsForm = new SettingsForm(settings);
             settingsForm.SetUpdateStatus(updateStatusText);
+            if (updateCheckInProgress || updateInstallInProgress)
+            {
+                settingsForm.SetUpdateButtonState(true, updateInstallInProgress ? "Installing..." : "Checking...");
+            }
+            settingsForm.FormClosed += delegate
+            {
+                settingsForm = null;
+                TryPostToUi(StartPendingUpdate);
+            };
             settingsForm.SettingsApplied += delegate
             {
                 ApplyStartupSetting();
@@ -1794,6 +1814,12 @@ namespace CodexUsageTray
                 return;
             }
 
+            if (!interactive && suppressAutomaticUpdates)
+            {
+                SetUpdateStatusText("Automatic updates paused after a failed update. Check updates to retry.");
+                return;
+            }
+
             if (updateCheckInProgress || updateInstallInProgress)
             {
                 if (interactive)
@@ -1867,40 +1893,15 @@ namespace CodexUsageTray
 
             SetUpdateStatusText("Version " + info.LatestVersion + " available");
 
-#if WPF_UI
-            if (!info.CanInstall)
+            if (info.CanInstall)
             {
-                SetUpdateStatusText("Update unavailable for this build.");
-                if (interactive)
-                {
-                    MessageBox.Show(GetSettingsOwner(), info.Message, "Codex Usage Updates",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                return;
-            }
-#endif
-            if (!interactive)
-            {
-                notifyIcon.ShowBalloonTip(
-                    5000,
-                    "Codex Usage Update",
-                    "Version " + info.LatestVersion + " is available. Open Settings and choose Check Updates to install it.",
-                    ToolTipIcon.Info);
+                InstallUpdate(info, interactive);
                 return;
             }
 
-            if (info.CanInstall)
+            SetUpdateStatusText(info.Message);
+            if (!interactive)
             {
-                DialogResult result = MessageBox.Show(
-                    GetSettingsOwner(),
-                    info.Message + Environment.NewLine + Environment.NewLine + "Install now? Codex Usage Tray will restart automatically.",
-                    "Codex Usage Updates",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Information);
-                if (result == DialogResult.Yes)
-                {
-                    InstallUpdate(info);
-                }
                 return;
             }
 
@@ -1916,7 +1917,7 @@ namespace CodexUsageTray
             }
         }
 
-        private void InstallUpdate(UpdateInfo info)
+        private void InstallUpdate(UpdateInfo info, bool interactive)
         {
             if (shuttingDown || updateInstallInProgress)
             {
@@ -1932,38 +1933,94 @@ namespace CodexUsageTray
                 delegate
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    return UpdateService.InstallUpdate(info);
+                    return UpdateService.PrepareUpdate(info);
                 },
                 cancellationToken,
                 TaskCreationOptions.None,
-                TaskScheduler.Default).ContinueWith(delegate(Task<string> task)
+                TaskScheduler.Default).ContinueWith(delegate(Task<PreparedUpdate> task)
             {
                 if (task.IsFaulted)
                 {
                     AggregateException ignored = task.Exception;
                 }
 
+                if (task.Status == TaskStatus.RanToCompletion)
+                {
+                    PreparedUpdate prepared = task.Result;
+                    try
+                    {
+                        cancellationToken.Register(prepared.Dispose);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        prepared.Dispose();
+                        return;
+                    }
+                    if (!TryPostToUi(delegate
+                    {
+                        pendingUpdate = prepared;
+                        pendingUpdateInteractive = interactive;
+                        StartPendingUpdate();
+                    }))
+                    {
+                        prepared.Dispose();
+                    }
+                    return;
+                }
+
                 TryPostToUi(delegate
                 {
+                    updateInstallInProgress = false;
+                    SetSettingsUpdateButtonState(false, null);
                     if (task.IsCanceled)
                     {
-                        updateInstallInProgress = false;
-                        SetSettingsUpdateButtonState(false, null);
                         SetUpdateStatusText("Update installation canceled.");
-                        return;
                     }
-                    if (task.IsFaulted)
+                    else
                     {
-                        updateInstallInProgress = false;
-                        SetSettingsUpdateButtonState(false, null);
-                        HandleUpdateError(task.Exception, true);
-                        return;
+                        HandleUpdateInstallError(task.Exception, interactive);
                     }
-
-                    notifyIcon.ShowBalloonTip(2000, "Codex Usage Updates", task.Result, ToolTipIcon.Info);
-                    ExitThread();
                 });
             }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        }
+
+        private void StartPendingUpdate()
+        {
+            if (shuttingDown || pendingUpdate == null) return;
+            try
+            {
+                if (!pendingUpdate.TryStart(settingsForm != null && !settingsForm.IsDisposed))
+                {
+                    SetUpdateStatusText("Update ready. Save or close Settings to restart.");
+                    return;
+                }
+                pendingUpdate = null;
+            }
+            catch (Exception error)
+            {
+                pendingUpdate.Dispose();
+                pendingUpdate = null;
+                updateInstallInProgress = false;
+                SetSettingsUpdateButtonState(false, null);
+                HandleUpdateInstallError(error, pendingUpdateInteractive);
+                return;
+            }
+            ExitThread();
+        }
+
+        private void HandleUpdateInstallError(Exception error, bool interactive)
+        {
+            Exception baseException = error != null ? error.GetBaseException() : null;
+            string message = baseException != null ? baseException.Message : "Unknown update error.";
+            SetUpdateStatusText("Update installation failed: " + message);
+            if (interactive)
+            {
+                MessageBox.Show(GetSettingsOwner(), "Could not install the update:" + Environment.NewLine + Environment.NewLine + message, "Codex Usage Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            else
+            {
+                notifyIcon.ShowBalloonTip(5000, "Codex Usage Updates", "Update installation failed. Open Settings for details.", ToolTipIcon.Warning);
+            }
         }
 
         private void HandleUpdateError(AggregateException exception, bool interactive)
@@ -2045,6 +2102,8 @@ namespace CodexUsageTray
             resetReminderTimer.Dispose();
             activityTimer.Stop();
             activityTimer.Dispose();
+            updateTimer.Stop();
+            updateTimer.Dispose();
             if (startupUiTimer != null)
             {
                 startupUiTimer.Stop();

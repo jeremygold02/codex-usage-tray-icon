@@ -40,6 +40,42 @@ namespace CodexUsageTray
         }
     }
 
+    internal sealed class PreparedUpdate : IDisposable
+    {
+        private readonly object sync = new object();
+        private readonly Action start;
+        private readonly Action cleanup;
+        private bool finished;
+
+        internal PreparedUpdate(Action start, Action cleanup)
+        {
+            this.start = start;
+            this.cleanup = cleanup;
+        }
+
+        public bool TryStart(bool settingsOpen)
+        {
+            lock (sync)
+            {
+                if (finished) throw new ObjectDisposedException("PreparedUpdate");
+                if (settingsOpen) return false;
+                start();
+                finished = true;
+                return true;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (sync)
+            {
+                if (finished) return;
+                finished = true;
+                cleanup();
+            }
+        }
+    }
+
     internal static class UpdateService
     {
         private const int GitHubTimeoutMilliseconds = 30000;
@@ -149,7 +185,7 @@ namespace CodexUsageTray
             };
         }
 
-        public static string InstallUpdate(UpdateInfo update)
+        public static PreparedUpdate PrepareUpdate(UpdateInfo update)
         {
             if (update == null || !update.UpdateAvailable)
             {
@@ -192,7 +228,7 @@ namespace CodexUsageTray
             string downloadedExe = "";
             string stagedExe = "";
             string scriptPath = "";
-            bool updaterStarted = false;
+            bool prepared = false;
 #if WPF_UI
             WpfUpdatePreparation preparation = null;
 #endif
@@ -223,10 +259,18 @@ namespace CodexUsageTray
                 WriteUpdaterScript(scriptPath, stagedExe, targetExe, backupExe, Process.GetCurrentProcess().Id);
 #endif
                 TryDeleteFile(downloadedExe);
-                StartUpdaterScript(powerShellPath, scriptPath, targetExe);
-                updaterStarted = true;
-
-                return "Update verified. Codex Usage Tray will restart automatically.";
+                PreparedUpdate result = new PreparedUpdate(
+                    delegate { StartUpdaterScript(powerShellPath, scriptPath, targetExe); },
+                    delegate
+                    {
+#if WPF_UI
+                        if (preparation != null) preparation.Cleanup();
+#endif
+                        TryDeleteFile(stagedExe);
+                        TryDeleteDirectory(tempDir);
+                    });
+                prepared = true;
+                return result;
             }
             catch (UpdateException)
             {
@@ -255,7 +299,7 @@ namespace CodexUsageTray
             }
             finally
             {
-                if (!updaterStarted)
+                if (!prepared)
                 {
 #if WPF_UI
                     if (preparation != null) preparation.Cleanup();
@@ -721,6 +765,23 @@ namespace CodexUsageTray
             }
         }
 
+        internal static string FailureNotificationScript()
+        {
+            return string.Join(Environment.NewLine, new string[]
+            {
+                "function Show-UpdateFailure([string]$message) {",
+                "  $icon = $null",
+                "  try {",
+                "    Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing",
+                "    $icon = New-Object System.Windows.Forms.NotifyIcon",
+                "    $icon.Icon = [System.Drawing.SystemIcons]::Warning; $icon.Visible = $true",
+                "    $icon.ShowBalloonTip(5000, 'Codex Usage Updates', $message, [System.Windows.Forms.ToolTipIcon]::Warning)",
+                "    Start-Sleep -Seconds 5",
+                "  } catch {} finally { if ($null -ne $icon) { $icon.Visible = $false; $icon.Dispose() } }",
+                "}"
+            });
+        }
+
         private static void WriteUpdaterScript(string scriptPath, string stagedExe, string targetExe, string backupExe, int pid)
         {
             string logPath = Path.ChangeExtension(scriptPath, ".log");
@@ -749,6 +810,7 @@ namespace CodexUsageTray
                 "  }",
                 "}",
                 "",
+                FailureNotificationScript(),
                 "function Get-AppProcesses {",
                 "  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {",
                 "    $_.ExecutablePath -and [string]::Equals($_.ExecutablePath, $target, [System.StringComparison]::OrdinalIgnoreCase)",
@@ -788,7 +850,7 @@ namespace CodexUsageTray
                 "  }",
                 "",
                 "  Remove-Item -LiteralPath $failedExe -Force -ErrorAction SilentlyContinue",
-                "  $restoredProcess = Start-Process -FilePath $target -WorkingDirectory $appDir -PassThru",
+                "  $restoredProcess = Start-Process -FilePath $target -WorkingDirectory $appDir -ArgumentList '--update-failed' -PassThru",
                 "  if ($null -eq $restoredProcess -or $restoredProcess.WaitForExit($startupCheckMilliseconds)) {",
                 "    throw 'The restored app did not remain running.'",
                 "  }",
@@ -857,6 +919,7 @@ namespace CodexUsageTray
                 "} catch {",
                 "  $failureMessage = $_.Exception.Message",
                 "  Write-UpdateLog \"Update failed: $failureMessage\"",
+                "  $recoveryFailed = $false",
                 "  try {",
                 "    if ($replacementInstalled) {",
                 "      Write-UpdateLog 'Restoring previous executable.'",
@@ -868,13 +931,16 @@ namespace CodexUsageTray
                 "        Start-Sleep -Milliseconds 250",
                 "      }",
                 "      if (@(Get-AppProcesses).Count -eq 0) {",
-                "        Start-Process -FilePath $target -WorkingDirectory $appDir | Out-Null",
+                "        Start-Process -FilePath $target -WorkingDirectory $appDir -ArgumentList '--update-failed' | Out-Null",
                 "        Write-UpdateLog 'Installed executable restarted after update preparation failed.'",
                 "      }",
                 "    }",
                 "  } catch {",
                 "    Write-UpdateLog \"Rollback failed: $($_.Exception.Message)\"",
+                "    $recoveryFailed = $true",
                 "  }",
+                "  if ($recoveryFailed) { Show-UpdateFailure 'Update failed and the previous app could not be restored. Manual installation may be required.' }",
+                "  else { Show-UpdateFailure 'Update could not be installed. The previous app remains available.' }",
                 "  $exitCode = 1",
                 "} finally {",
                 "  Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue",

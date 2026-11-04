@@ -270,6 +270,7 @@ namespace CodexUsageTray
             lines.AddRange(new string[]
             {
                 "function Log([string]$message) { try { Add-Content -LiteralPath $log -Value \"$(Get-Date -Format o) $message\" } catch {} }",
+                UpdateService.FailureNotificationScript(),
                 "function Assert-PlainDirectory([string]$path) {",
                 "  $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop",
                 "  while ($null -ne $item) {",
@@ -343,8 +344,10 @@ namespace CodexUsageTray
                 "  }",
                 "  if ($ownsMutex) { $mutex.ReleaseMutex(); $ownsMutex = $false }; if ($null -ne $mutex) { $mutex.Dispose(); $mutex = $null }",
                 "  if ($rollbackComplete -and @(Get-AppProcesses).Count -eq 0) {",
-                "    try { Assert-PlainFile $target $true; $restored = Start-Process -FilePath $target -WorkingDirectory $appDir -WindowStyle Hidden -PassThru; if ($null -eq $restored -or $restored.WaitForExit(5000)) { throw 'The previous app exited during restart.' } } catch { $rollbackComplete = $false; Log ('Previous app restart failed: ' + $_.Exception.Message) }",
+                "    try { Assert-PlainFile $target $true; $restored = Start-Process -FilePath $target -WorkingDirectory $appDir -WindowStyle Hidden -ArgumentList '--update-failed' -PassThru; if ($null -eq $restored -or $restored.WaitForExit(5000)) { throw 'The previous app exited during restart.' } } catch { $rollbackComplete = $false; Log ('Previous app restart failed: ' + $_.Exception.Message) }",
                 "  }",
+                "  if ($rollbackComplete) { Show-UpdateFailure 'Update could not be installed. The previous app remains available.' }",
+                "  else { Show-UpdateFailure 'Update failed and the previous app could not be restored. Manual installation may be required.' }",
                 "} finally {",
                 "  if ($ownsMutex) { $mutex.ReleaseMutex() }; if ($null -ne $mutex) { $mutex.Dispose() }",
                 "  if ($success -or $rollbackComplete) { try { Remove-Staging } catch { Log ('Staging cleanup failed: ' + $_.Exception.Message) } }",

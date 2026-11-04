@@ -24,7 +24,7 @@ The WPF UI build integrates the redesigned popup, settings, and history header w
 
 Release builds embed their release version. For a local build based on a known release, add `-p:LocalWpfVersion=<release-version>` to the build command so update checks compare against that version instead of the development default.
 
-WPF updates use the matching WPF package from a release. The app verifies its download and stages its complete set of files before restarting; if installation or startup fails, it attempts to restore the previous files. Classic builds continue to use the single-executable release. A release without a matching WPF package cannot be installed as a WPF update.
+The app checks for updates at startup and every hour while running. Compatible updates are downloaded and installed automatically, then the app restarts after any open Settings window is saved or closed; **Check updates** in Settings checks immediately. Successful updates are silent. Installation failures produce a notification, and Settings shows the reason when the app is running. After a failed installation, the restored app pauses automatic update checks for that session to avoid a retry loop; use **Check updates** to retry or restart the app to resume checks. WPF updates use the matching WPF package from a release. The app verifies its download and stages its complete set of files before restarting; if installation or startup fails, it attempts to restore the previous files. Classic builds continue to use the single-executable release. A release without a matching WPF package cannot be installed as a WPF update.
 
 ## How usage is read
 

@@ -39,11 +39,17 @@ namespace CodexUsageTray
                 {
                     TestUpdaterDetachment();
                 }
+                else if (args.Length == 1 && args[0] == "--classic-only")
+                {
+                    TestClassicUpdaterNotifications();
+                }
                 else
                 {
                     TestReleaseAssetAndIntegrity();
+                    TestPreparedUpdateHandoff();
                     TestPreparation();
                     TestUnsafeArchives();
+                    TestClassicUpdaterNotifications();
                     TestInstallAndRollback();
                     TestUpdaterDetachment();
                 }
@@ -60,6 +66,30 @@ namespace CodexUsageTray
             }
         }
 
+        private static void TestPreparedUpdateHandoff()
+        {
+            int starts = 0;
+            int cleanups = 0;
+            var update = new PreparedUpdate(delegate { starts++; }, delegate { cleanups++; });
+            Check(!update.TryStart(true), "open Settings defers the prepared update");
+            Check(!update.TryStart(true) && starts == 0 && cleanups == 0, "waiting retains the staged update");
+            Check(update.TryStart(false) && starts == 1, "closing Settings starts the update");
+            update.Dispose();
+            Check(cleanups == 0, "started updater owns its staged files");
+
+            var canceled = new PreparedUpdate(delegate { starts++; }, delegate { cleanups++; });
+            Check(!canceled.TryStart(true), "another open Settings window defers restart");
+            canceled.Dispose();
+            canceled.Dispose();
+            Check(cleanups == 1 && starts == 1, "shutdown cleans a waiting update exactly once");
+            ExpectFailure(delegate { canceled.TryStart(false); }, "disposed update cannot start");
+
+            var failed = new PreparedUpdate(delegate { throw new InvalidOperationException("synthetic start failure"); }, delegate { cleanups++; });
+            ExpectFailure(delegate { failed.TryStart(false); }, "updater start failure");
+            failed.Dispose();
+            Check(cleanups == 2, "failed updater start cleans staged files");
+        }
+
         private static int RunFakeApp()
         {
             string directory = AppDomain.CurrentDomain.BaseDirectory;
@@ -74,6 +104,7 @@ namespace CodexUsageTray
                         File.WriteAllText(Path.Combine(directory, "synthetic-error.txt"), "The synthetic app's isolated mutex already exists.");
                         return 92;
                     }
+                    File.WriteAllText(Path.Combine(directory, "synthetic-arguments.txt"), string.Join(" ", Environment.GetCommandLineArgs()));
                     File.WriteAllText(Path.Combine(directory, "synthetic-process-id.txt"), Process.GetCurrentProcess().Id.ToString());
                     string exitSignal = Path.Combine(directory, "synthetic-exit.txt");
                     for (int tick = 0; tick < 300; tick++)
@@ -218,6 +249,42 @@ namespace CodexUsageTray
             for (int position = 0; position < Names.Length; position++) RunLockedCase(position);
         }
 
+        private static void TestClassicUpdaterNotifications()
+        {
+            RunClassicInstallCase(false);
+            RunClassicInstallCase(true);
+        }
+
+        private static void RunClassicInstallCase(bool shouldRollback)
+        {
+            var env = NewEnvironment(shouldRollback ? "classic-rollback" : "classic-success");
+            string stage = Path.Combine(env.App, "synthetic-update.tmp");
+            string scriptPath = Path.Combine(env.Temp, "update.ps1");
+            string backup = env.Target + ".bak";
+            string originalHash = Hash(env.Target);
+            string failingExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "where.exe");
+            File.WriteAllBytes(stage, shouldRollback ? File.ReadAllBytes(failingExe) : fakeApp);
+            Invoke("WriteUpdaterScript", scriptPath, stage, env.Target, backup, int.MaxValue);
+            string script = File.ReadAllText(scriptPath);
+            const string marker = "$replacementInstalled = $false";
+            Check(script.Contains(marker), "classic notification hook exists");
+            string notification = Path.Combine(env.Case, "failure-notification.txt").Replace("'", "''");
+            string capture = "function Show-UpdateFailure([string]$message) { [IO.File]::WriteAllText('" + notification + "', $message) }" + Environment.NewLine;
+            File.WriteAllText(scriptPath, script.Replace(marker, capture + marker), new UTF8Encoding(false));
+            CheckScriptSyntax(scriptPath);
+            try
+            {
+                Check(RunPowerShell(scriptPath) == (shouldRollback ? 1 : 0), "classic updater status");
+                Check(File.Exists(Path.Combine(env.Case, "failure-notification.txt")) == shouldRollback,
+                    "classic updater reports only failures");
+                if (shouldRollback) Check(Hash(env.Target) == originalHash, "classic rollback restores original executable");
+                WaitForFakeApp(env);
+                Check(File.ReadAllText(Path.Combine(env.App, "synthetic-arguments.txt")).Contains("--update-failed") == shouldRollback,
+                    "classic recovery pauses automatic update retries");
+            }
+            finally { StopFakeApp(env); }
+        }
+
         private static void TestUpdaterDetachment()
         {
             TestUpdaterExitsBeforeChild(false);
@@ -357,6 +424,7 @@ namespace CodexUsageTray
                 int previousPid = old.Id;
                 preparation = WpfUpdatePackage.PrepareForTesting(archive, env.App, env.Target, env.Temp,
                     Guid.NewGuid().ToString("N"), previousPid, env.MutexName);
+                CaptureFailureNotification(env, preparation);
                 ThreadPool.QueueUserWorkItem(delegate {
                     Thread.Sleep(1200);
                     File.WriteAllText(Path.Combine(env.App, "synthetic-exit.txt"), "close");
@@ -402,6 +470,7 @@ namespace CodexUsageTray
                 {
                     Check(RunPowerShell(preparation.ScriptPath) == 1, "locked file rejects replacement " + position);
                 }
+                Check(File.Exists(Path.Combine(env.Case, "failure-notification.txt")), "locked update reports failure " + position);
                 foreach (var old in oldHashes)
                     Check(Hash(old.Key) == old.Value, "locked file rollback restores " + Path.GetFileName(old.Key) + " at " + position);
                 Check(File.ReadAllText(Path.Combine(env.App, "user-note.txt")) == "keep", "locked update preserves unrelated file " + position);
@@ -438,6 +507,8 @@ namespace CodexUsageTray
                 }
                 int exitCode = RunPowerShell(preparation.ScriptPath);
                 Check(exitCode == (shouldRollback ? 1 : 0), name + " updater exit status: " + exitCode);
+                Check(File.Exists(Path.Combine(env.Case, "failure-notification.txt")) == shouldRollback,
+                    name + " reports failure only when the update fails");
                 Check(File.ReadAllText(Path.Combine(env.App, "user-note.txt")) == "keep", name + " preserves unrelated file");
                 if (shouldRollback)
                 {
@@ -452,6 +523,8 @@ namespace CodexUsageTray
                     Check(File.Exists(env.Target + ".config"), "renamed executable configuration installed");
                 }
                 WaitForFakeApp(env);
+                Check(File.ReadAllText(Path.Combine(env.App, "synthetic-arguments.txt")).Contains("--update-failed") == shouldRollback,
+                    name + " recovery pauses automatic update retries");
             }
             finally { StopFakeApp(env); preparation.Cleanup(); }
         }
@@ -475,8 +548,20 @@ namespace CodexUsageTray
         private static WpfUpdatePreparation Prepare(TestEnvironment env, string archive)
         {
             // This PID does not exist. Never pass the real tray PID to a generated script.
-            return WpfUpdatePackage.PrepareForTesting(archive, env.App, env.Target, env.Temp,
+            WpfUpdatePreparation preparation = WpfUpdatePackage.PrepareForTesting(archive, env.App, env.Target, env.Temp,
                 Guid.NewGuid().ToString("N"), int.MaxValue, env.MutexName);
+            CaptureFailureNotification(env, preparation);
+            return preparation;
+        }
+
+        private static void CaptureFailureNotification(TestEnvironment env, WpfUpdatePreparation preparation)
+        {
+            string script = File.ReadAllText(preparation.ScriptPath);
+            const string marker = "$success = $false; $rollbackComplete = $true;";
+            Check(script.Contains(marker), "synthetic notification hook exists");
+            string path = Path.Combine(env.Case, "failure-notification.txt").Replace("'", "''");
+            string capture = "function Show-UpdateFailure([string]$message) { [IO.File]::WriteAllText('" + path + "', $message) }" + Environment.NewLine;
+            File.WriteAllText(preparation.ScriptPath, script.Replace(marker, capture + marker), new UTF8Encoding(false));
         }
 
         private static List<KeyValuePair<string, byte[]>> ValidEntries(byte[] executable)

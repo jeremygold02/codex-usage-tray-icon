@@ -209,7 +209,7 @@ namespace CodexUsageTray
                 CreateSettingsPage("Forecast & graphs", "Choose how forecasts and usage graphs are displayed.", BuildForecastGroup()),
                 CreateSettingsPage("Appearance", "Personalize the app and tray icon.", BuildAppearanceGroup()),
                 CreateSettingsPage("Popup", "Choose which details appear in the tray popup.", BuildPopupGroup()),
-                CreateSettingsPage("Updates", "Check the installed version and look for updates.", BuildSystemGroup())
+                CreateSettingsPage("Updates", "Updates install automatically and restart the app.", BuildSystemGroup())
             };
             foreach (Control page in pages)
             {
@@ -718,7 +718,7 @@ namespace CodexUsageTray
             updateOptions.Controls.Add(checkUpdatesButton);
 
             groupLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            groupLayout.Controls.Add(CreateSettingCard("Application updates", "Check the installed version and look for updates.", updateOptions), 0, 0);
+            groupLayout.Controls.Add(CreateSettingCard("Application updates", "Updates install automatically and restart the app.", updateOptions), 0, 0);
             group.Controls.Add(groupLayout);
             return group;
         }
