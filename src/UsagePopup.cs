@@ -12,7 +12,7 @@ namespace CodexUsageTray
         private const int WmDpiChanged = 0x02E0;
         private const int LogicalWidth = 520;
         private const int LogicalHeaderBottom = 54;
-        private const int LogicalHistoryHeight = 66;
+        private const int LogicalHistoryHeight = 116;
         private const int LogicalUsageRowHeight = 104;
         private const int LogicalFooterTopGap = 8;
         private const int LogicalContentBottomPadding = 8;
@@ -53,6 +53,7 @@ namespace CodexUsageTray
         private bool bodyScrollable;
         private int layoutWidth;
         private WeeklyHistorySummary historySummary;
+        private int hoveredHistoryDay = -1;
 #if WPF_UI
         private System.Windows.Forms.Integration.ElementHost wpfHost;
         private UsagePopupView wpfView;
@@ -134,7 +135,7 @@ namespace CodexUsageTray
             bodyScrollBar.AccessibleDescription = "Scroll to see all usage and reset details";
             bodyScrollBar.TabIndex = 4;
             bodyScrollBar.TabStop = true;
-            bodyScrollBar.ValueChanged += delegate { Invalidate(); };
+            bodyScrollBar.ValueChanged += delegate { hoveredHistoryDay = -1; Invalidate(); };
             Controls.Add(bodyScrollBar);
 
             actionToolTip = new ToolTip();
@@ -325,6 +326,29 @@ namespace CodexUsageTray
             base.OnMouseWheel(e);
             if (bodyScrollable && e.Delta != 0)
                 ScrollBody(-(e.Delta / SystemInformation.MouseWheelScrollDelta) * bodyScrollBar.SmallChange * 3);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+#if !WPF_UI
+            int day = GetHistoryDayAt(e.Location);
+            if (hoveredHistoryDay != day)
+            {
+                hoveredHistoryDay = day;
+                Invalidate();
+            }
+#endif
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (hoveredHistoryDay >= 0)
+            {
+                hoveredHistoryDay = -1;
+                Invalidate();
+            }
         }
 
         private int GetMaximumScrollValue()
@@ -644,22 +668,27 @@ namespace CodexUsageTray
 
         private string GetHistorySummaryDetail()
         {
-            return HasObservedDailyUsage() ? "Observed usage" : "Not enough history yet";
+            if (historySummary != null && hoveredHistoryDay >= 0 && hoveredHistoryDay < historySummary.DailyUsage.Length)
+                return FormatDailyUsageDetail(historySummary.DailyDates[hoveredHistoryDay],
+                    historySummary.DailyUsage[hoveredHistoryDay], historySummary.DailyPartial[hoveredHistoryDay]);
+            return "Hover over a day for details";
         }
 
         private int GetLogicalHistoryHeight()
         {
-            if (!UseNarrowLayout) return LogicalHistoryHeight;
-            int lines = GetWrappedLineCount(GetHistorySummaryDetail(), Math.Max(1, layoutWidth - ScaleMetric(68)));
-            return 8 + 21 + 19 + lines * 21 + (HasObservedDailyUsage() ? 26 : 0) + 8 + 10;
+            return UseNarrowLayout ? LogicalHistoryHeight + 21 : LogicalHistoryHeight;
         }
 
-        private bool HasObservedDailyUsage()
+        internal static string FormatDailyUsageDetail(DateTime date, double? daily, bool partial)
         {
-            if (historySummary == null) return false;
-            for (int day = 0; day < historySummary.DailyUsage.Length; day++)
-                if (historySummary.DailyUsage[day].HasValue) return true;
-            return false;
+            string usage = "Usage unavailable";
+            if (daily.HasValue)
+            {
+                string value = daily.Value > 0 && daily.Value < 0.001 ? "<0.001" :
+                    daily.Value.ToString("0.###", CultureInfo.CurrentCulture);
+                usage = "Observed: " + value + "% used" + (partial ? " · Partial coverage" : "");
+            }
+            return date.ToString("ddd, MMM d", CultureInfo.CurrentCulture) + " · " + usage;
         }
 
         private double GetMaxObservedDailyUsage()
@@ -744,70 +773,27 @@ namespace CodexUsageTray
                 TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis |
                 TextFormatFlags.PreserveGraphicsClipping;
             int left = card.Left + ScaleMetric(10);
-            if (UseNarrowLayout)
-            {
-                int innerWidth = Math.Max(1, card.Width - ScaleMetric(20));
-                Rectangle fullLine = new Rectangle(left, y + ScaleMetric(7), innerWidth, ScaleMetric(20));
-                TextRenderer.DrawText(graphics, "Usage history", detailHeadingFont, fullLine, textColor, flags);
-                fullLine.Y = y + ScaleMetric(28);
-                TextRenderer.DrawText(graphics, "Last 7 days", detailFont, fullLine, mutedColor, flags);
-                string info = GetHistorySummaryDetail();
-                int lines = GetWrappedLineCount(info, innerWidth);
-                fullLine.Y = y + ScaleMetric(47);
-                fullLine.Height = ScaleMetric(lines * 21);
-                TextRenderer.DrawText(graphics, info, detailFont, fullLine, mutedColor,
-                    TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix |
-                        TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
-                if (HasObservedDailyUsage())
-                {
-                    int narrowBottom = y + ScaleMetric(47 + lines * 21 + 22);
-                    int narrowStep = Math.Max(1, innerWidth / 7);
-                    int narrowBarWidth = Math.Max(1, narrowStep - ScaleMetric(4));
-                    for (int day = 0; day < 7; day++)
-                    {
-                        int barX = left + day * narrowStep;
-                        double? observed = historySummary.DailyUsage[day];
-                        if (!observed.HasValue)
-                        {
-                            using (Pen pen = new Pen(GetBorderColor(dark), Math.Max(1.0f, currentDpi / 96.0f)))
-                                graphics.DrawLine(pen, barX, narrowBottom, barX + narrowBarWidth, narrowBottom);
-                            continue;
-                        }
-                        int barHeight = Math.Max(ScaleMetric(2), (int)Math.Round(ScaleMetric(20) *
-                            Math.Max(0, observed.Value) / GetMaxObservedDailyUsage()));
-                        Color color = SystemInformation.HighContrast ? SystemColors.Highlight :
-                            (day == 6 ? Color.FromArgb(71, 172, 247) : Color.FromArgb(54, 112, 172));
-                        using (Brush brush = new SolidBrush(color))
-                            graphics.FillRectangle(brush, barX, narrowBottom - barHeight, narrowBarWidth, barHeight);
-                    }
-                }
-                return;
-            }
+            int innerWidth = Math.Max(1, card.Width - ScaleMetric(20));
             TextRenderer.DrawText(graphics, "Usage history", detailHeadingFont,
-                new Rectangle(left, y + ScaleMetric(7), ScaleMetric(112), ScaleMetric(20)), textColor, flags);
+                new Rectangle(left, y + ScaleMetric(7), innerWidth, ScaleMetric(20)), textColor, flags);
             TextRenderer.DrawText(graphics, "Last 7 days", detailFont,
-                new Rectangle(left, y + ScaleMetric(27), ScaleMetric(112), ScaleMetric(17)), mutedColor, flags);
-            if (!HasObservedDailyUsage())
-            {
-                TextRenderer.DrawText(graphics, "Not enough history yet", detailFont,
-                    new Rectangle(card.Left + ScaleMetric(140), y + ScaleMetric(15), ScaleMetric(225), ScaleMetric(22)),
-                    mutedColor, flags);
-                return;
-            }
+                new Rectangle(left, y + ScaleMetric(7), innerWidth, ScaleMetric(20)), mutedColor, flags | TextFormatFlags.Right);
 
-            int chartLeft = card.Left + ScaleMetric(135);
-            int bottom = y + ScaleMetric(44);
-            int barWidth = ScaleMetric(18);
-            int step = ScaleMetric(25);
+            Rectangle chart = GetHistoryChartBounds(y);
+            int bottom = y + ScaleMetric(58);
             for (int day = 0; day < 7; day++)
             {
-                int x = chartLeft + day * step;
-                double? observed = historySummary.DailyUsage[day];
+                int start = chart.Left + chart.Width * day / 7;
+                int end = chart.Left + chart.Width * (day + 1) / 7;
+                int barWidth = Math.Max(1, Math.Min(ScaleMetric(20), end - start - ScaleMetric(4)));
+                int x = start + (end - start - barWidth) / 2;
+                double? observed = historySummary != null ? historySummary.DailyUsage[day] : null;
                 if (observed.HasValue)
                 {
-                    int height = Math.Max(ScaleMetric(2), (int)Math.Round(ScaleMetric(30) *
+                    int height = Math.Max(ScaleMetric(2), (int)Math.Round(ScaleMetric(28) *
                         Math.Max(0, observed.Value) / GetMaxObservedDailyUsage()));
-                    Color color = SystemInformation.HighContrast ? SystemColors.Highlight :
+                    Color color = SystemInformation.HighContrast ? SystemColors.Highlight : hoveredHistoryDay == day ?
+                        Color.FromArgb(131, 205, 255) :
                         (day == 6 ? Color.FromArgb(71, 172, 247) : Color.FromArgb(54, 112, 172));
                     Rectangle bar = new Rectangle(x, bottom - height, barWidth, height);
                     using (GraphicsPath path = RoundedRectangle(bar, Math.Min(ScaleMetric(2), height / 2)))
@@ -815,10 +801,41 @@ namespace CodexUsageTray
                 }
                 else
                 {
-                    using (Pen pen = new Pen(GetBorderColor(dark), Math.Max(1.0f, currentDpi / 96.0f)))
+                    Color marker = hoveredHistoryDay == day
+                        ? (SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(131, 205, 255))
+                        : GetBorderColor(dark);
+                    using (Pen pen = new Pen(marker, Math.Max(1.0f, currentDpi / 96.0f)))
                         graphics.DrawLine(pen, x, bottom, x + barWidth, bottom);
                 }
+                if (historySummary != null)
+                    TextRenderer.DrawText(graphics, historySummary.DailyDates[day].ToString("ddd", CultureInfo.CurrentCulture),
+                        resetDetailFont, new Rectangle(start, y + ScaleMetric(60), end - start, ScaleMetric(16)),
+                        mutedColor, flags | TextFormatFlags.HorizontalCenter);
             }
+            TextFormatFlags detailFlags = UseNarrowLayout
+                ? TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping
+                : flags;
+            TextRenderer.DrawText(graphics, GetHistorySummaryDetail(), detailFont,
+                new Rectangle(left, y + ScaleMetric(79), innerWidth, ScaleMetric(UseNarrowLayout ? 40 : 20)), mutedColor, detailFlags);
+        }
+
+        private Rectangle GetHistoryChartBounds(int y)
+        {
+            return new Rectangle(ScaleMetric(22), y + ScaleMetric(28),
+                Math.Max(1, BodyWidth - ScaleMetric(44)), ScaleMetric(48));
+        }
+
+        private int GetHistoryDayAt(Point point)
+        {
+            if (!HasWeeklyHistorySummary() || historySummary == null) return -1;
+            int bodyTop = ScaleMetric(GetLogicalHeaderBottom());
+            if (point.Y < bodyTop || point.Y >= ClientSize.Height - ScaleMetric(4)) return -1;
+            int y = bodyTop - (bodyScrollable ? bodyScrollBar.Value : 0);
+            Rectangle chart = GetHistoryChartBounds(y);
+            if (!chart.Contains(point)) return -1;
+            for (int day = 0; day < 7; day++)
+                if (point.X < chart.Left + (long)chart.Width * (day + 1) / 7) return day;
+            return -1;
         }
 
         private string GetResetDetail(LimitWindow window, DateTime lastUpdated)
@@ -1367,6 +1384,11 @@ namespace CodexUsageTray
                 details.Add("Weekly: " + snapshot.Weekly.RemainingPercent.ToString(CultureInfo.CurrentCulture) + "% remaining");
             if (snapshot.FiveHour != null)
                 details.Add("5-hour: " + snapshot.FiveHour.RemainingPercent.ToString(CultureInfo.CurrentCulture) + "% remaining");
+            if (historySummary != null)
+            {
+                for (int day = 0; day < historySummary.DailyUsage.Length; day++)
+                    details.Add(FormatDailyUsageDetail(historySummary.DailyDates[day], historySummary.DailyUsage[day], historySummary.DailyPartial[day]));
+            }
             string status = !string.IsNullOrWhiteSpace(snapshot.StatusMessage) ? snapshot.StatusMessage :
                 (!string.IsNullOrWhiteSpace(snapshot.ErrorMessage) ? snapshot.ErrorMessage : BuildStatusLine());
             if (!string.IsNullOrWhiteSpace(status)) details.Add(status);

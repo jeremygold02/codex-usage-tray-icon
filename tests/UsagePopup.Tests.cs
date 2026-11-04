@@ -3,15 +3,20 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace CodexUsageTray.Tests
 {
     internal static class UsagePopupTests
     {
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+
         public static void Run()
         {
             TestObservedDailyUsage();
+            TestDailyHistoryHover();
             TestResetEntrySpacing();
             UsageHistoryStore history = new UsageHistoryStore(Path.Combine(Path.GetTempPath(),
                 "PopupTests-" + Guid.NewGuid().ToString("N") + ".json"));
@@ -334,6 +339,68 @@ namespace CodexUsageTray.Tests
             for (int day = 0; day < 7; day++)
                 Assert(!empty.DailyUsage[day].HasValue && empty.DailyDates[day].Date == today.AddDays(day - 6),
                     "empty history has seven dated, unavailable days");
+        }
+
+        private static void TestDailyHistoryHover()
+        {
+            UsageHistoryStore history = new UsageHistoryStore(Path.Combine(Path.GetTempPath(),
+                "PopupDailyHover-" + Guid.NewGuid().ToString("N") + ".json"));
+            using (UsagePopup popup = new UsagePopup(new AppSettings(), history))
+            {
+                popup.UpdateSnapshot(new UsageSnapshot { LastUpdated = DateTime.Now,
+                    Weekly = new LimitWindow { UsedPercent = 25, WindowMinutes = 10080, ResetAfterSeconds = 86400 } });
+                IntPtr handle = popup.Handle;
+                Assert(handle != IntPtr.Zero, "daily history popup has a window handle");
+                UsagePopup.WeeklyHistorySummary summary = new UsagePopup.WeeklyHistorySummary();
+                for (int day = 0; day < 7; day++)
+                {
+                    summary.DailyDates[day] = DateTime.Today.AddDays(day - 6);
+                    summary.DailyUsage[day] = day == 2 ? (double?)null : day;
+                    summary.DailyPartial[day] = day == 4;
+                }
+                typeof(UsagePopup).GetField("historySummary", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(popup, summary);
+                MethodInfo scale = typeof(UsagePopup).GetMethod("ScaleMetric", BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo header = typeof(UsagePopup).GetMethod("GetLogicalHeaderBottom", BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo bounds = typeof(UsagePopup).GetMethod("GetHistoryChartBounds", BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo mouseMove = typeof(UsagePopup).GetMethod("OnMouseMove", BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo detail = typeof(UsagePopup).GetMethod("GetHistorySummaryDetail", BindingFlags.NonPublic | BindingFlags.Instance);
+                MethodInfo layout = typeof(UsagePopup).GetMethod("ApplyLayoutMetricsInArea", BindingFlags.NonPublic | BindingFlags.Instance);
+                foreach (int width in new[] { 240, 520 })
+                {
+                    layout.Invoke(popup, new object[] { false, 500, (int)scale.Invoke(popup, new object[] { width }) });
+                    int top = (int)scale.Invoke(popup, new object[] { (int)header.Invoke(popup, null) });
+                    Rectangle chart = (Rectangle)bounds.Invoke(popup, new object[] { top });
+                    Assert(chart.Width > popup.ClientSize.Width * 0.7, "daily chart fills the available width");
+                    for (int day = 0; day < 7; day++)
+                    {
+                        int x = chart.Left + (chart.Width * (day * 2 + 1) / 14);
+                        int y = chart.Top + 2;
+                        SendMessage(handle, 0x0200, IntPtr.Zero, new IntPtr((y << 16) | x));
+                        string actual = (string)detail.Invoke(popup, null);
+                        Assert(actual == UsagePopup.FormatDailyUsageDetail(summary.DailyDates[day], summary.DailyUsage[day], summary.DailyPartial[day]),
+                            "hover selects the correct daily details, including zero and unavailable days");
+                        if (day > 0)
+                        {
+                            int edge = chart.Left + chart.Width * day / 7;
+                            SendMessage(handle, 0x0200, IntPtr.Zero, new IntPtr((y << 16) | edge));
+                            Assert((string)detail.Invoke(popup, null) == actual, "hover aligns with each drawn column boundary");
+                        }
+                    }
+                    mouseMove.Invoke(popup, new object[] { new MouseEventArgs(MouseButtons.None, 0, chart.Left - 1, chart.Top + 2, 0) });
+                    Assert((string)detail.Invoke(popup, null) == "Hover over a day for details", "leaving the chart clears daily details");
+                }
+                layout.Invoke(popup, new object[] { false, 130, (int)scale.Invoke(popup, new object[] { 520 }) });
+                VScrollBar scroll = Field<VScrollBar>(popup, "bodyScrollBar");
+                Assert(Field<bool>(popup, "bodyScrollable"), "short popup scrolls its history chart");
+                scroll.Value = Math.Min(12, scroll.Maximum - scroll.LargeChange + 1);
+                int bodyTop = (int)scale.Invoke(popup, new object[] { (int)header.Invoke(popup, null) });
+                Rectangle scrolledChart = (Rectangle)bounds.Invoke(popup, new object[] { bodyTop - scroll.Value });
+                int dayX = scrolledChart.Left + scrolledChart.Width * 5 / 14;
+                mouseMove.Invoke(popup, new object[] { new MouseEventArgs(MouseButtons.None, 0, dayX, scrolledChart.Top + 2, 0) });
+                Assert(((string)detail.Invoke(popup, null)).Contains("Usage unavailable"), "hover accounts for the scroll offset");
+                mouseMove.Invoke(popup, new object[] { new MouseEventArgs(MouseButtons.None, 0, dayX, bodyTop - 1, 0) });
+                Assert((string)detail.Invoke(popup, null) == "Hover over a day for details", "clipped history cannot capture the fixed header");
+            }
         }
 
         private static UsageHistorySample WeeklyReading(DateTime localTime, double used, DateTime reset)

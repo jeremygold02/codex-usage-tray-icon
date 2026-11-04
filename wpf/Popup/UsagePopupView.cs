@@ -202,32 +202,54 @@ namespace CodexUsageTray
 
         private UIElement HistoryCard()
         {
-            var grid = new Grid();
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(state.Compact ? 80 : 90) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            if (state.Compact) { grid.RowDefinitions.Add(new RowDefinition()); grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); }
-            var title = new StackPanel();
-            title.Children.Add(Label("Usage history", 12, text));
-            title.Children.Add(Label("Last 7 days", 11.5, muted));
-            grid.Children.Add(title);
-            var bars = new UniformGrid { Columns = 7, VerticalAlignment = VerticalAlignment.Bottom,
-                HorizontalAlignment = HorizontalAlignment.Stretch, MaxWidth = 217, Height = 28, Margin = new Thickness(4, 0, 8, 0) };
+            var layout = new StackPanel();
+            var heading = new Grid();
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            heading.Children.Add(Label("Usage history", 12, text, FontWeights.SemiBold));
+            var range = Label("Last 7 days", 11.5, muted);
+            Grid.SetColumn(range, 1); heading.Children.Add(range);
+            layout.Children.Add(heading);
+
+            var bars = new UniformGrid { Columns = 7, HorizontalAlignment = HorizontalAlignment.Stretch,
+                Height = 48, Margin = new Thickness(0, 6, 0, 0) };
+            var details = Label("Hover or focus a day for details", 11.5, muted);
+            details.Margin = new Thickness(0, 5, 0, 0);
+            details.TextWrapping = TextWrapping.Wrap;
+            details.Height = state.Compact ? 34 : 17;
+            details.TextTrimming = TextTrimming.CharacterEllipsis;
+            AutomationProperties.SetAutomationId(details, "DailyUsageDetails");
+            string[] descriptions = new string[state.Daily.Length];
+            int hoveredDay = -1;
+            int focusedDay = -1;
+            Action updateDetails = delegate
+            {
+                int selected = hoveredDay >= 0 ? hoveredDay : focusedDay;
+                details.Text = selected >= 0 ? descriptions[selected] : "Hover or focus a day for details";
+            };
             double maximum = 1;
             foreach (double? daily in state.Daily) if (daily.HasValue) maximum = Math.Max(maximum, daily.Value);
             for (int day = 0; day < state.Daily.Length; day++)
             {
+                int index = day;
                 double? daily = state.Daily[day];
                 DateTime date = state.DailyDates[day];
-                string description = date.ToString("ddd, MMM d", CultureInfo.CurrentCulture) + "\n" +
-                    (daily.HasValue ? "Observed: " + FormatObservedUsage(daily.Value) + " used" : "Usage unavailable") +
-                    (daily.HasValue && state.DailyPartial[day] ? "\nPartial coverage" : "");
+                string description = UsagePopup.FormatDailyUsageDetail(date, daily, state.DailyPartial[day]);
+                descriptions[day] = description;
                 Brush normal = daily.HasValue ? Brush("#3E9CE6") : border;
                 Brush highlighted = SystemParameters.HighContrast ? SystemColors.HighlightBrush : Brush("#83CDFF");
                 var bar = new Border { Height = !daily.HasValue ? 1 : daily.Value <= 0 ? 2 : Math.Max(4, Math.Min(28, daily.Value * 28 / maximum)),
-                    Margin = new Thickness(4, 0, 4, 0), VerticalAlignment = VerticalAlignment.Bottom,
+                    MaxWidth = 20, Margin = new Thickness(5, 0, 5, 0), VerticalAlignment = VerticalAlignment.Bottom,
                     CornerRadius = new CornerRadius(1), Background = normal };
                 var hit = new Grid { Background = Brushes.Transparent };
+                hit.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                hit.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
                 hit.Children.Add(bar);
+                var dayLabel = Label(date.ToString("ddd", CultureInfo.CurrentCulture), 10, muted);
+                dayLabel.HorizontalAlignment = HorizontalAlignment.Center;
+                dayLabel.Margin = new Thickness(0, 3, 0, 0);
+                dayLabel.IsHitTestVisible = false;
+                Grid.SetRow(dayLabel, 1); hit.Children.Add(dayLabel);
                 var button = new System.Windows.Controls.Button { Content = hit, Padding = new Thickness(0), Margin = new Thickness(0),
                     BorderThickness = new Thickness(0), Background = Brushes.Transparent, Focusable = true,
                     MinWidth = 0, MinHeight = 0,
@@ -242,29 +264,16 @@ namespace CodexUsageTray
                 presenter.SetBinding(ContentPresenter.ContentProperty, new System.Windows.Data.Binding("Content")
                     { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent) });
                 button.Template = new ControlTemplate(typeof(System.Windows.Controls.Button)) { VisualTree = presenter };
-                var tipText = new TextBlock { Text = description, Foreground = text, FontSize = 12, LineHeight = 17 };
-                button.ToolTip = new ToolTip { Content = tipText, Background = card, Foreground = text,
-                    BorderBrush = border, BorderThickness = new Thickness(1), Padding = new Thickness(10, 7, 10, 7),
-                    Placement = PlacementMode.Top };
-                ToolTipService.SetInitialShowDelay(button, 0);
-                ToolTipService.SetBetweenShowDelay(button, 0);
-                ToolTipService.SetShowDuration(button, 15000);
-                AutomationProperties.SetName(button, description.Replace("\n", "; "));
-                button.MouseEnter += delegate { bar.Background = highlighted; };
-                button.MouseLeave += delegate { bar.Background = button.IsKeyboardFocusWithin ? highlighted : normal; };
-                button.GotKeyboardFocus += delegate { bar.Background = highlighted; };
-                button.LostKeyboardFocus += delegate { bar.Background = button.IsMouseOver ? highlighted : normal; };
+                AutomationProperties.SetName(button, description.Replace(" · ", "; "));
+                button.MouseEnter += delegate { hoveredDay = index; bar.Background = highlighted; updateDetails(); };
+                button.MouseLeave += delegate { if (hoveredDay == index) hoveredDay = -1; bar.Background = button.IsKeyboardFocusWithin ? highlighted : normal; updateDetails(); };
+                button.GotKeyboardFocus += delegate { focusedDay = index; bar.Background = highlighted; updateDetails(); };
+                button.LostKeyboardFocus += delegate { if (focusedDay == index) focusedDay = -1; bar.Background = button.IsMouseOver ? highlighted : normal; updateDetails(); };
                 bars.Children.Add(button);
             }
-            Grid.SetColumn(bars, 1); grid.Children.Add(bars);
-            if (state.Compact) { Grid.SetRow(bars, 1); Grid.SetColumn(bars, 0); Grid.SetColumnSpan(bars, 2); }
-            return Card(grid, new Thickness(0, 9, 0, 0));
-        }
-
-        private static string FormatObservedUsage(double value)
-        {
-            if (value > 0 && value < 0.001) return "<0.001%";
-            return value.ToString("0.###", CultureInfo.CurrentCulture) + "%";
+            layout.Children.Add(bars);
+            layout.Children.Add(details);
+            return Card(layout, new Thickness(0, 9, 0, 0));
         }
 
         private UIElement UsageCard(Row row)

@@ -13,7 +13,6 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Forms.Integration;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -164,6 +163,9 @@ namespace CodexUsageTray
                 Check(!HasText(view, "Avg. remaining") && !HasText(view, "Observed avg."), "Popup does not display an average");
                 var dailyGrid = FindVisual<UniformGrid>(view);
                 Check(dailyGrid != null && dailyGrid.Children.Count == 7, "Popup exposes seven daily usage bars");
+                Check(dailyGrid.ActualWidth > view.ActualWidth * 0.7, "Daily bars use the available card width");
+                var dailyDetails = FindDailyDetails(view);
+                Check(dailyDetails != null && dailyDetails.Text == "Hover or focus a day for details", "Daily details start with an instruction");
                 var actualDaily = UsagePopup.BuildWeeklyHistorySummary(history.Samples, DateTime.UtcNow);
                 for (int day = 0; day < 7; day++)
                 {
@@ -173,18 +175,17 @@ namespace CodexUsageTray
                         ", grid=" + dailyGrid.ActualWidth + "x" + dailyGrid.ActualHeight +
                         ", alignment=" + dayButton.HorizontalAlignment + "/" + dayButton.VerticalAlignment + ", margin=" + dayButton.Margin +
                         ", grid columns=" + dailyGrid.Columns + ", rows=" + dailyGrid.Rows + ", children=" + dailyGrid.Children.Count);
-                    var tip = dayButton.ToolTip as ToolTip;
-                    var content = tip == null ? null : tip.Content as TextBlock;
-                    Check(content != null && ToolTipService.GetInitialShowDelay(dayButton) == 0 &&
-                        ToolTipService.GetBetweenShowDelay(dayButton) == 0, "Daily tooltip appears without a hover delay");
+                    var point = dayButton.TranslatePoint(new System.Windows.Point(dayButton.ActualWidth / 2, dayButton.ActualHeight / 2), view);
+                    var hitResult = VisualTreeHelper.HitTest(view, point);
+                    Check(hitResult != null && IsDescendantOf(hitResult.VisualHit, dayButton), "Daily column is hit-testable at its center");
                     string expected = actualDaily.DailyUsage[day].HasValue
                         ? "Observed: " + actualDaily.DailyUsage[day].Value.ToString("0.###", CultureInfo.CurrentCulture) + "% used"
                         : "Usage unavailable";
-                    Check(content.Text.Contains(expected) && content.Text.Contains(actualDaily.DailyDates[day].ToString("ddd, MMM d", CultureInfo.CurrentCulture)) &&
-                        AutomationProperties.GetName(dayButton) == content.Text.Replace("\n", "; "),
+                    string name = AutomationProperties.GetName(dayButton);
+                    Check(name.Contains(expected) && name.Contains(actualDaily.DailyDates[day].ToString("ddd, MMM d", CultureInfo.CurrentCulture)),
                         "Daily bar exposes its real observed usage and date accessibly");
                     if (actualDaily.DailyUsage[day].HasValue && actualDaily.DailyPartial[day])
-                        Check(content.Text.Contains("Partial coverage"), "Daily tooltip explains partial coverage");
+                        Check(name.Contains("Partial coverage"), "Daily details explain partial coverage");
                 }
                 var hoverButton = (System.Windows.Controls.Button)dailyGrid.Children[5];
                 var hit = (Grid)hoverButton.Content;
@@ -192,34 +193,15 @@ namespace CodexUsageTray
                 System.Windows.Media.Color beforeHover = ((SolidColorBrush)dailyBar.Background).Color;
                 hoverButton.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
                 Check(((SolidColorBrush)dailyBar.Background).Color != beforeHover, "Daily bar immediately highlights on mouse enter");
+                Check(dailyDetails.Text.Replace(" · ", "; ") == AutomationProperties.GetName(hoverButton), "Hover shows the selected day's details in the card");
                 CaptureWpf(host, output, "popup-day-hover-wpf");
-                var openedTip = (ToolTip)hoverButton.ToolTip;
-                openedTip.PlacementTarget = hoverButton;
-                openedTip.IsOpen = true;
-                Pump();
-                var openedContent = (TextBlock)openedTip.Content;
-                System.Windows.Point textOrigin = openedContent.TranslatePoint(new System.Windows.Point(0, 0), openedTip);
-                File.WriteAllText(Path.Combine(output, "tooltip-layout.txt"), "Tooltip actual=" + openedTip.ActualWidth + "x" + openedTip.ActualHeight +
-                    "; content origin=" + textOrigin + "; content actual=" + openedContent.ActualWidth + "x" + openedContent.ActualHeight +
-                    "; content desired=" + openedContent.DesiredSize + "; tooltip render=" + openedTip.RenderSize + ".\n");
-                Check(openedTip.IsOpen && openedTip.IsVisible && textOrigin.X >= 0 && textOrigin.Y >= 0 &&
-                    textOrigin.X + openedContent.DesiredSize.Width <= openedTip.ActualWidth &&
-                    textOrigin.Y + openedContent.DesiredSize.Height <= openedTip.ActualHeight && openedContent.Text.Contains("Observed:") &&
-                    openedContent.Text.Contains("% used") && openedContent.Text.Contains("Partial coverage"),
-                    "Opened day tooltip shows unclipped date, observed usage and coverage");
-                var tipSource = PresentationSource.FromVisual(openedTip) as HwndSource;
-                NativeRect tipBounds = new NativeRect();
-                Check(tipSource != null && GetWindowRect(tipSource.Handle, out tipBounds), "Opened tooltip has a native window");
-                var workArea = Forms.Screen.FromHandle(tipSource.Handle).WorkingArea;
-                Check(tipBounds.Left >= workArea.Left && tipBounds.Top >= workArea.Top &&
-                    tipBounds.Right <= workArea.Right && tipBounds.Bottom <= workArea.Bottom,
-                    "Opened tooltip is positioned inside the working area");
-                CaptureVisual(openedTip, output, "popup-day-tooltip-wpf");
-                openedTip.IsOpen = false;
-                Pump();
                 hoverButton.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
                 Check(((SolidColorBrush)dailyBar.Background).Color == beforeHover, "Daily bar returns to its normal color on mouse leave");
-                CheckDailyTooltipCases();
+                Check(dailyDetails.Text == "Hover or focus a day for details", "Daily details reset when the pointer leaves");
+                hoverButton.RaiseEvent(new KeyboardFocusChangedEventArgs(Keyboard.PrimaryDevice, 0, null, hoverButton) { RoutedEvent = Keyboard.GotKeyboardFocusEvent });
+                Check(dailyDetails.Text.Replace(" · ", "; ") == AutomationProperties.GetName(hoverButton), "Keyboard focus shows the same daily details");
+                hoverButton.RaiseEvent(new KeyboardFocusChangedEventArgs(Keyboard.PrimaryDevice, 0, hoverButton, null) { RoutedEvent = Keyboard.LostKeyboardFocusEvent });
+                CheckDailyDetailCases();
                 var tooltipField = typeof(UsagePopup).GetField("actionToolTip", BindingFlags.Instance | BindingFlags.NonPublic);
                 var tooltips = (Forms.ToolTip)tooltipField.GetValue(popup);
                 Check(string.IsNullOrEmpty(tooltips.GetToolTip(popup)) && popup.AccessibleDescription.Contains("Full reset"),
@@ -535,7 +517,7 @@ namespace CodexUsageTray
             return false;
         }
 
-        private static void CheckDailyTooltipCases()
+        private static void CheckDailyDetailCases()
         {
             var fixture = new UsagePopupView();
             var state = new UsagePopupView.State
@@ -553,21 +535,45 @@ namespace CodexUsageTray
             fixture.UpdateLayout();
             var bars = FindVisual<UniformGrid>(fixture);
             Check(bars != null && bars.Children.Count == 7, "Fixture exposes all seven daily bars");
-            Check(DailyTip(bars, 0).Contains("Observed: 0% used") && DailyTip(bars, 0).Contains("Partial coverage"),
+            Check(DailyDetail(fixture, bars, 0).Contains("Observed: 0% used") && DailyDetail(fixture, bars, 0).Contains("Partial coverage"),
                 "Observed zero is explicit and reports partial coverage");
             string fraction = 0.4.ToString("0.###", CultureInfo.CurrentCulture);
-            Check(DailyTip(bars, 1).Contains("Observed: " + fraction + "% used"), "Small nonzero usage is not rounded to zero");
-            Check(DailyTip(bars, 2).Contains("Usage unavailable"), "Missing observations are not reported as zero");
-            Check(DailyTip(bars, 3).Contains("Observed: 130% used") && !DailyTip(bars, 3).Contains("Partial coverage"),
+            Check(DailyDetail(fixture, bars, 1).Contains("Observed: " + fraction + "% used"), "Small nonzero usage is not rounded to zero");
+            Check(DailyDetail(fixture, bars, 2).Contains("Usage unavailable"), "Missing observations are not reported as zero");
+            Check(DailyDetail(fixture, bars, 3).Contains("Observed: 130% used") && !DailyDetail(fixture, bars, 3).Contains("Partial coverage"),
                 "Usage over 100 percent and full coverage remain distinct");
-            Check(DailyTip(bars, 4).Contains("<0.001% used"), "Very small positive usage is distinguishable from zero");
+            Check(DailyDetail(fixture, bars, 4).Contains("<0.001% used"), "Very small positive usage is distinguishable from zero");
         }
 
-        private static string DailyTip(UniformGrid grid, int index)
+        private static string DailyDetail(FrameworkElement fixture, UniformGrid grid, int index)
         {
             var button = (System.Windows.Controls.Button)grid.Children[index];
-            var tooltip = (ToolTip)button.ToolTip;
-            return ((TextBlock)tooltip.Content).Text;
+            button.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+            string result = FindDailyDetails(fixture).Text;
+            button.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
+            return result;
+        }
+
+        private static TextBlock FindDailyDetails(DependencyObject parent)
+        {
+            var text = parent as TextBlock;
+            if (text != null && AutomationProperties.GetAutomationId(text) == "DailyUsageDetails") return text;
+            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            {
+                var found = FindDailyDetails(VisualTreeHelper.GetChild(parent, index));
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static bool IsDescendantOf(DependencyObject element, DependencyObject ancestor)
+        {
+            while (element != null)
+            {
+                if (ReferenceEquals(element, ancestor)) return true;
+                element = VisualTreeHelper.GetParent(element);
+            }
+            return false;
         }
 
         private static T FindVisual<T>(DependencyObject parent) where T : DependencyObject
@@ -590,20 +596,6 @@ namespace CodexUsageTray
             Check(width > 0 && height > 0, name + " has drawable dimensions");
             var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
             bitmap.Render(child);
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            using (var stream = new FileStream(Path.Combine(directory, name + ".png"), FileMode.CreateNew)) encoder.Save(stream);
-        }
-
-        private static void CaptureVisual(FrameworkElement element, string directory, string name)
-        {
-            element.UpdateLayout();
-            int width = (int)Math.Ceiling(element.ActualWidth), height = (int)Math.Ceiling(element.ActualHeight);
-            Check(width > 0 && height > 0, name + " has drawable dimensions");
-            // Tooltip templates can render a drop-shadow outside their layout
-            // bounds; leave room for that effect in the exported visual.
-            var bitmap = new RenderTargetBitmap(width + 32, height + 32, 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(element);
             var encoder = new PngBitmapEncoder();
             encoder.Frames.Add(BitmapFrame.Create(bitmap));
             using (var stream = new FileStream(Path.Combine(directory, name + ".png"), FileMode.CreateNew)) encoder.Save(stream);
@@ -661,8 +653,6 @@ namespace CodexUsageTray
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool PrintWindow(IntPtr window, IntPtr deviceContext, uint flags);
-        [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
-        [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(IntPtr window, out NativeRect bounds);
         private delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
         [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint threadId, EnumWindowsCallback callback, IntPtr parameter);

@@ -63,7 +63,7 @@ Claude Desktop and CLI share account allowances, but **Desktop sign-in alone doe
 
 The popup shows each primary weekly or 5-hour limit returned by Codex. Temporarily unavailable windows are hidden; if neither window is returned, the refresh fails with a clear status instead of displaying unknown values. A status line also appears while refreshing or when automatic checks are paused.
 
-When a weekly limit is available, the popup's seven daily bars show usage observed during each local calendar day. In the WPF build, hover or focus a bar to see the date and observed percentage used; partial coverage is labeled. Days without a usable interval are unavailable. Intervals crossing midnight, a reset, or a plan change, and gaps over two hours are excluded because their usage cannot be assigned reliably to a day.
+When a weekly limit is available, the popup's seven daily bars show usage observed during each local calendar day. Hover over a day to see its date and observed percentage used beneath the chart; in the WPF build, keyboard focus shows the same details. Partial coverage is labeled, and days without a usable interval are unavailable. Intervals crossing midnight, a reset, or a plan change, and gaps over two hours are excluded because their usage cannot be assigned reliably to a day.
 
 Available banked resets are always listed directly below usage, with their count, titles, and local expiration dates when supplied by Codex. There is no collapse control or setting to hide them. The section is absent when no resets are available. Settings can still hide usage reset times or last-updated times.
 
