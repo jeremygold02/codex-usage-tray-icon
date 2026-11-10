@@ -19,206 +19,22 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Compile executable
+      - name: Set up Rust
         shell: pwsh
         run: |
-          $source = "CodexUsageTray.cs"
-          $sourceDir = "src"
-          $icon = "icon.ico"
-          $exe = "CodexUsageTray.exe"
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain installation failed." }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw "Could not select the stable Rust toolchain." }
 
-          if (-not (Test-Path -LiteralPath $source)) {
-            throw "Entrypoint source file not found: $source"
-          }
-          if (-not (Test-Path -LiteralPath $sourceDir)) {
-            throw "Source folder not found: $sourceDir"
-          }
-          if (-not (Test-Path -LiteralPath $icon)) {
-            throw "Icon file not found: $icon"
-          }
+      - name: Check formatting
+        run: cargo fmt --check
 
-          $sourceFiles = Get-ChildItem -LiteralPath $sourceDir -Filter "*.cs" |
-            Sort-Object Name |
-            Select-Object -ExpandProperty FullName
-          if (-not $sourceFiles) {
-            throw "No source files found in $sourceDir"
-          }
+      - name: Run tests
+        run: cargo test --locked
 
-          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
-          $candidates = @(
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
-          )
-          $compiler = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-          if (-not $compiler) {
-            throw "Could not find .NET Framework csc.exe."
-          }
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-          $compilerArgs = @(
-            "/nologo",
-            "/langversion:5",
-            "/warnaserror+",
-            "/target:winexe",
-            "/optimize+",
-            "/platform:anycpu",
-            "/win32icon:$icon",
-            "/out:$exe",
-            "/reference:System.dll",
-            "/reference:System.Core.dll",
-            "/reference:System.Drawing.dll",
-            "/reference:System.Windows.Forms.dll",
-            "/reference:System.Web.Extensions.dll",
-            $source
-          ) + $sourceFiles
-
-          & $compiler $compilerArgs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Build failed with exit code $LASTEXITCODE."
-          }
-          if (-not (Test-Path -LiteralPath $exe)) {
-            throw "Build completed without creating $exe"
-          }
-          if ((Get-Item -LiteralPath $exe).Length -le 0) {
-            throw "Build created an empty executable."
-          }
-
-      - name: Build WPF UI version
-        shell: pwsh
-        run: |
-          dotnet build CodexUsageTray.Wpf.csproj --configuration Release --warnaserror
-          if ($LASTEXITCODE -ne 0) { throw "WPF UI build failed with exit code $LASTEXITCODE." }
-          dotnet build tests/WpfIntegration/WpfIntegration.csproj --configuration Release --warnaserror
-          if ($LASTEXITCODE -ne 0) { throw "WPF integration checks failed to build with exit code $LASTEXITCODE." }
-
-      - name: Validate WPF release package
-        shell: pwsh
-        run: |
-          $outputDir = "bin\Release\net481"
-          $files = @(
-            "CodexUsageTray.exe",
-            "CodexUsageTray.exe.config",
-            "System.Buffers.dll",
-            "System.Memory.dll",
-            "System.Numerics.Vectors.dll",
-            "System.Runtime.CompilerServices.Unsafe.dll",
-            "Wpf.Ui.Abstractions.dll",
-            "Wpf.Ui.dll"
-          )
-          foreach ($name in $files) {
-            $path = Join-Path $outputDir $name
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) {
-              throw "WPF package file is missing or empty: $name"
-            }
-          }
-          $expectedPaths = @($files | ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $outputDir $_)) })
-          $runtimeFiles = Get-ChildItem -LiteralPath $outputDir -Recurse -File | Where-Object {
-            $_.Extension -in @(".dll", ".exe") -or $_.Name -like "*.exe.config"
-          }
-          foreach ($file in $runtimeFiles) {
-            if ($expectedPaths -notcontains $file.FullName) { throw "Unexpected WPF runtime file: $($file.FullName)" }
-          }
-
-          Add-Type -AssemblyName System.IO.Compression
-          $archivePath = Join-Path $env:RUNNER_TEMP "CodexUsageTray-Wpf.zip"
-          $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
-          try {
-            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
-            try {
-              foreach ($name in $files) {
-                $entry = $archive.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
-                $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
-                $inputStream = [System.IO.File]::OpenRead((Join-Path $outputDir $name))
-                try {
-                  $entryStream = $entry.Open()
-                  try { $inputStream.CopyTo($entryStream) } finally { $entryStream.Dispose() }
-                } finally { $inputStream.Dispose() }
-              }
-            } finally { $archive.Dispose() }
-          } finally { $stream.Dispose() }
-
-          $stream = [System.IO.File]::OpenRead($archivePath)
-          try {
-            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read, $true)
-            try {
-              $actual = @($archive.Entries | ForEach-Object { $_.FullName })
-              if ($actual.Count -ne $files.Count -or (Compare-Object $files $actual)) {
-                throw "WPF package does not contain exactly the expected flat set of files."
-              }
-            } finally { $archive.Dispose() }
-          } finally { $stream.Dispose() }
-
-      - name: Run WPF updater tests
-        shell: pwsh
-        run: |
-          dotnet build tests/WpfUpdater/WpfUpdater.Tests.csproj --configuration Release --warnaserror
-          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed to build with exit code $LASTEXITCODE." }
-          & .\tests\WpfUpdater\bin\Release\net481\WpfUpdater.Tests.exe
-          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed with exit code $LASTEXITCODE." }
-
-      - name: Validate updater script syntax
-        shell: powershell
-        run: |
-          $tempDir = Join-Path $env:RUNNER_TEMP ("codex-updater-parse-" + [guid]::NewGuid().ToString("N"))
-          New-Item -ItemType Directory -Path $tempDir | Out-Null
-          try {
-            $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path "CodexUsageTray.exe").Path)
-            $type = $assembly.GetType("CodexUsageTray.UpdateService", $true)
-            $method = $type.GetMethod(
-              "WriteUpdaterScript",
-              [Reflection.BindingFlags]"Static,NonPublic")
-            $script = [string](Join-Path $tempDir "update.ps1")
-            $staged = [string](Join-Path $tempDir "staged.exe")
-            $target = [string](Join-Path $tempDir "target.exe")
-            $backup = [string](Join-Path $tempDir "target.exe.bak")
-            $method.Invoke(
-              $null,
-              [object[]]@($script, $staged, $target, $backup, [int]12345))
-
-            $tokens = $null
-            $errors = $null
-            [void][Management.Automation.Language.Parser]::ParseFile(
-              $script,
-              [ref]$tokens,
-              [ref]$errors)
-            if ($errors.Count -ne 0) {
-              $errors | ForEach-Object { Write-Error $_.Message }
-              throw "Generated updater script has PowerShell syntax errors."
-            }
-          } finally {
-            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Run usage parser tests
-        shell: pwsh
-        run: |
-          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
-          $compiler = @(
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
-          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-          if (-not $compiler) {
-            throw "Could not find .NET Framework csc.exe."
-          }
-
-          $testExe = "CodexUsageTray.Tests.exe"
-          & $compiler `
-            /nologo `
-            /langversion:5 `
-            /target:exe `
-            /optimize+ `
-            "/out:$testExe" `
-            /reference:System.dll `
-            /reference:System.Core.dll `
-            /reference:System.Drawing.dll `
-            /reference:System.Windows.Forms.dll `
-            /reference:System.Web.Extensions.dll `
-            tests\*.cs `
-            src\*.cs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Test compilation failed with exit code $LASTEXITCODE."
-          }
-
-          & ".\$testExe" "tests\fixtures\rate-limits.json"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tests failed with exit code $LASTEXITCODE."
-          }
+      - name: Build release executable
+        run: cargo build --locked --release

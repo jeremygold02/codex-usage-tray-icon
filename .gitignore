@@ -3,6 +3,7 @@
 *.bak
 bin/
 obj/
+target/
 
 # Local build scripts
 *.ps1

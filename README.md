@@ -2,9 +2,9 @@
 
 Codex Usage Tray is a Windows tray utility for monitoring the usage limits of the account signed in to the Codex CLI. The tray icon shows the selected remaining-usage percentage, and a left-click opens a compact popup with weekly and 5-hour remaining usage, estimated time until depletion, and reset timing.
 
-![Codex Usage WPF popup showing usage history, remaining limits, and available resets](docs/images/tray-usage-details.png)
+![Codex Usage Tray popup showing usage history, remaining limits, and available resets](docs/images/tray-usage-details.png)
 
-_Screenshots use sample data and combine off-screen captures of the app and its WPF surfaces._
+_Screenshots use sample data rendered by the application._
 
 ## Requirements
 
@@ -14,17 +14,28 @@ _Screenshots use sample data and combine off-screen captures of the app and its 
 
 The app looks for the standard npm Codex installation and then for `codex` on the Windows `PATH`. It does not provide a separate sign-in flow.
 
-## Download
+## Download and run
 
-Download `CodexUsageTray-Wpf.zip` from the [GitHub releases page](https://github.com/jeremygold02/codex-usage-tray-icon/releases/latest) for the WPF interface, or `CodexUsageTray.exe` for the classic single-file build. Older releases may not include the WPF package.
+Download `usage-tray-rs.exe` from the [GitHub releases page](https://github.com/jeremygold02/codex-usage-tray-icon/releases/latest) when a release containing it is available. Older releases may contain only the previous application's assets. Run the executable to start the tray icon; it is a native Windows executable and does not require .NET or Python at runtime.
 
-## WPF UI build
+If replacing the earlier application, exit it before starting the Rust version. On the first run, if `%APPDATA%\CodexUsageTrayRs` does not exist, the app copies the earlier version's settings, history, and notification state from `%APPDATA%\CodexUsageTray` when present. It leaves the original files unchanged and turns off **Start with Windows** and **Auto-use resets** in the copied settings; enable them again in Settings if desired. The earlier application's Windows startup entry is separate and must be disabled separately if it was enabled.
 
-The WPF UI build integrates the redesigned popup, settings, and history header with the existing tray app and real usage data. The interactive history graph continues to use the existing chart renderer. To build it locally on Windows with the .NET SDK and .NET Framework 4.8.1, run `dotnet build CodexUsageTray.Wpf.csproj -c Release`, then run `bin\Release\net481\CodexUsageTray.exe` from its output directory. Keep the accompanying DLL and configuration files with the executable. Close any existing tray instance before starting this build; the two builds share a single-instance lock and the same user settings and history.
+## Build and verify
 
-Release builds embed their release version. For a local build based on a known release, add `-p:LocalWpfVersion=<release-version>` to the build command so update checks compare against that version instead of the development default.
+Install a current stable Rust toolchain with the Windows MSVC target and its required C++ build tools and Windows SDK. From the repository root, run:
 
-The app checks for updates at startup and every hour while running. Compatible updates are downloaded and installed automatically. Background updates wait until an open Settings window closes; **Check updates** checks immediately and restarts automatically when Settings has no unsaved changes. If there are unsaved changes, save or discard them before the restart. Successful updates are silent. Installation failures produce a notification, and Settings shows the reason when the app is running. After a failed installation, the restored app pauses automatic update checks for that session to avoid a retry loop; use **Check updates** to retry or restart the app to resume checks. WPF updates use the matching WPF package from a release. The app verifies its download and stages its complete set of files before restarting; if installation or startup fails, it attempts to restore the previous files. Classic builds continue to use the single-executable release. A release without a matching WPF package cannot be installed as a WPF update.
+```powershell
+cargo fmt -- --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo build --release
+```
+
+Run `.\target\release\usage-tray-rs.exe`. To close an existing Rust tray instance before rebuilding or starting another, run `.\target\release\usage-tray-rs.exe --exit`. A build uses the Cargo package version unless `USAGE_TRAY_VERSION` is set when compiling to identify a release.
+
+## Updates
+
+The app checks GitHub releases at startup and every hour while running. When a newer release contains a verifiable `usage-tray-rs.exe` asset, it downloads and installs the update automatically. Background updates wait until an open Settings window closes; **Check updates** checks immediately and restarts when Settings has no unsaved changes. Save or discard unsaved changes to continue. The app verifies the download before replacing itself and attempts to restore the previous executable if the new one fails to start. After an installation failure, automatic checks pause for that session; use **Check updates** to retry or restart the app. A release without a compatible Rust asset cannot be installed by the updater.
 
 ## How usage is read
 
@@ -44,7 +55,7 @@ An existing Claude Code **v2.1.251 or later** [status-line collector](https://co
 {
   "statusLine": {
     "type": "command",
-    "command": "\"C:/Tools/CodexUsageTray.exe\" --claude-statusline"
+    "command": "\"C:/Tools/usage-tray-rs.exe\" --claude-statusline"
   }
 }
 ```
@@ -63,7 +74,7 @@ Claude Desktop and CLI share account allowances, but **Desktop sign-in alone doe
 
 The popup shows each primary weekly or 5-hour limit returned by Codex. Temporarily unavailable windows are hidden; if neither window is returned, the refresh fails with a clear status instead of displaying unknown values. A status line also appears while refreshing or when automatic checks are paused.
 
-When a weekly limit is available, the popup's seven daily bars show usage observed during each local calendar day. Hover over a day to see its date and observed percentage used beneath the chart; in the WPF build, keyboard focus shows the same details. Partial coverage is labeled, and days without a usable interval are unavailable. Intervals crossing midnight, a reset, or a plan change, and gaps over two hours are excluded because their usage cannot be assigned reliably to a day.
+When a weekly limit is available, the popup's seven daily bars show usage observed during each local calendar day. Hover over a day to see its date and observed percentage used beneath the chart. Partial coverage is labeled, and days without a usable interval are unavailable. Intervals crossing midnight, a reset, or a plan change, and gaps over two hours are excluded because their usage cannot be assigned reliably to a day.
 
 Available banked resets are always listed directly below usage, with their count, titles, and local expiration dates when supplied by Codex. There is no collapse control or setting to hide them. The section is absent when no resets are available. Settings can still hide usage reset times or last-updated times.
 
@@ -80,7 +91,7 @@ Available banked resets are always listed directly below usage, with their count
 - Open **Usage history** from the tray menu or the chart icon beside Refresh. Each chart starts at the first recorded reading after its latest reset and advances automatically when a new reset is observed. Prior cycles remain available for learning but are hidden from the chart. The 5-hour option appears only when the account reports a 5-hour limit. There is no Clear history button. Move or drag across the recorded chart to snap a vertical guide to the nearest percentage change. Repeated unchanged polls become a flat segment, retaining its start and latest time. The footer shows the reading's local timestamp and usage percentages; leaving the chart restores the latest reading. Arrow keys also select percentage changes.
 - Readings are connected with a blue line. Dashed segments span gaps over two hours; they connect observations without implying measurements were taken in between. Reset or usage-adjustment boundaries remain disconnected and have vertical dotted markers at the observation time. Only endpoints, resets, and the selected reading are emphasized with point markers.
 - The time axis extends to the current window's reset deadline whenever it is known, with local calendar/time ticks and labels aligned to their ticks. When an estimate is available, an amber dashed **Projected** path extends from the latest recorded reading through the reset. If it reaches zero earlier, it stays flat at zero until the reset; the forecast text still reports the actual estimated depletion time. Hourly patterns vary their slope, including flat inactive periods; simple pace estimates remain straight. Hover or drag over the entire projected period to inspect the estimated time and whole-number percentages, explicitly labeled **Projected**. Remaining is rounded once and used is its complement, so they always add to 100%; the underlying path and depletion calculations retain full precision. Refreshing keeps the last fresh projection visible until the new reading replaces it. Stale or insufficient data hides the projection.
-- Successful quota readings are saved locally in `%APPDATA%\CodexUsageTray\usage-history.json` and `claude-usage-history.json`, with the same rolling caps of 28 days and 45,000 observations. Repeated unchanged readings are compacted while preserving endpoints and hourly anchors. Patterns can learn across reset cycles and survive restart; interval consumption and validation never cross a reset. Older readings are removed automatically. Claude's CLI token logs cannot reconstruct quota percentages, so its learning uses actual quota readings collected by the tray.
+- Successful quota readings are saved locally in `%APPDATA%\CodexUsageTrayRs\usage-history.json` and `claude-usage-history.json`, with the same rolling caps of 28 days and 45,000 observations. Repeated unchanged readings are compacted while preserving endpoints and hourly anchors. Patterns can learn across reset cycles and survive restart; interval consumption and validation never cross a reset. Older readings are removed automatically. Claude's CLI token logs cannot reconstruct quota percentages, so its learning uses actual quota readings collected by the tray.
 - After the first successful Codex refresh, a one-time background import reads up to four weeks of account-quota events from local `sessions` and `archived_sessions` under `CODEX_HOME` (or `%USERPROFILE%\.codex`). Prior reset cycles are included. Cached regressive events and events contradicting live readings are excluded rather than interpreted as resets; token counts are never converted into quota percentages. Import scans recent files first, with a 30-second or 8-GiB budget per attempt; interrupted scans resume on a later refresh and only reread unfinished/appended data. Completion and retained imported days are stored in `usage-history.json.imported`, so normal launches with intact history do not rescan. If an older app removed the backfilled cycles, the missing coverage triggers a repair import. Normal four-week expiry does not trigger a scan. Existing installations receive one repair backfill when upgrading from completion flags that did not record coverage. Afterward, normal usage refreshes update the local learning window for both providers. History belongs to the Windows user and is not separated by account. Source logs remain untouched.
 
 ![Weekly usage history with observed and projected remaining allowance](docs/images/usage-history.png)
@@ -94,7 +105,7 @@ _The history chart above uses sample data._
 - Idle refresh defaults to off. When no Codex process is running, automatic checks pause unless an idle interval is configured; manual refresh remains available.
 - A failed refresh keeps the last successful values visible and marks them as stale instead of replacing them with empty data.
 - The first successful refresh that observes a weekly or 5-hour limit return to 100% shows one reset notification. Startup-at-100, stale refreshes, and brief 99%-to-100% jitter do not produce duplicate alerts.
-- The app caches the last observed banked resets in `%APPDATA%\\CodexUsageTray\\banked-reset-state.json` and shows a tray notification whenever a new one becomes available, including resets added while the app was closed. The first refresh without an existing cache establishes a baseline quietly.
+- The app caches the last observed banked resets in `%APPDATA%\CodexUsageTrayRs\banked-reset-state.json` and shows a tray notification whenever a new one becomes available, including resets added while the app was closed. The first refresh without an existing cache establishes a baseline quietly.
 - **Reset expiry reminders** defaults to 24 hours before expiration and can be disabled or set from 1 to 72 hours. Each itemized credit with a known expiration produces one reminder, independent of **Auto-use resets**. The app checks once at startup and revalidates known credits when their reminder becomes due, including while idle checks are paused. Notification state is saved in `reset-reminders.json` to avoid repeats after restart. The app must be running and able to refresh to deliver a reminder.
 - **Tray icon shows → Auto** selects whichever available limit has the lower remaining percentage, preferring weekly on a tie. The tooltip identifies the selected limit. Explicit Weekly and 5-hour choices remain available.
 - **Auto-use resets** is opt-in and disabled by default. When enabled, the app can redeem an itemized Codex reset credit shortly before expiration, defaulting to five minutes, only when there is usage to reset. Redemption attempts use persisted idempotency state to prevent duplicates.
@@ -110,11 +121,13 @@ _The history chart above uses sample data._
 - **App-server errors or timeouts:** update the Codex CLI, confirm it starts normally, and retry from the popup. The last successful snapshot remains visible after a failed refresh.
 - **No weekly or 5-hour limits returned:** retry the refresh and update the Codex CLI if the error persists. The app treats auxiliary model limits as supplemental data, not a replacement for the account's primary limits.
 - **Waiting for Codex / checks paused:** start Codex, use manual refresh, or configure an idle refresh interval in Settings.
-- **Reset expiration details are missing:** those rows appear only when Codex returns the corresponding account data and the related popup option is enabled.
+- **Reset expiration details are missing:** those rows appear only when Codex returns the corresponding account data.
+
+The current windows do not expose their custom controls to screen readers or provide a high-contrast mode, and the popup does not have a separate compact layout for narrow screens.
 
 ## Privacy
 
-Codex credentials remain managed by the Codex CLI; the tray app does not copy or store them. Usage history stores local timestamps, usage percentages, reset timing, and import/reset-adjustment metadata. Preferences, history, and notification state are saved locally under `%APPDATA%\CodexUsageTray`; history contains no prompts or conversation content.
+Codex credentials remain managed by the Codex CLI; the tray app does not copy or store them. Usage history stores local timestamps, usage percentages, reset timing, and import/reset-adjustment metadata. Preferences, history, and notification state are saved locally under `%APPDATA%\CodexUsageTrayRs`; history contains no prompts or conversation content. Set `USAGE_TRAY_DATA_DIR` to use a different data directory for a trial run.
 
 The Codex CLI contacts OpenAI for authenticated rate-limit reads and, when **Auto-use resets** is enabled, supported reset-credit redemption requests. The tray app also contacts GitHub to check for releases and, when requested, download an update. It has no separate telemetry or analytics path and does not send prompts or synthetic model requests.
 

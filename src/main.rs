@@ -1,4 +1,4 @@
-//! Rust prototype of Codex Usage Tray.
+//! Native Codex Usage Tray.
 //!
 //! One executable runs the long-lived tray and the short-lived popup,
 //! Settings, and provider-specific history window processes. The tray owns

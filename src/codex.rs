@@ -558,7 +558,7 @@ fn integer(value: &Value) -> Option<i64> {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = include_str!("../../tests/fixtures/rate-limits.json");
+    const FIXTURE: &str = include_str!("../tests/fixtures/rate-limits.json");
 
     fn parse(json: &str) -> Result<Usage, FetchError> {
         parse_rate_limits(&serde_json::from_str(json).unwrap(), 1_783_700_000)

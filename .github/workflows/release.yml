@@ -27,6 +27,7 @@ jobs:
         shell: pwsh
         run: |
           git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch main." }
           $mainSha = [string](git rev-parse origin/main)
           if (-not [string]::Equals($mainSha.Trim(), $env:GITHUB_SHA, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "Release SHA $env:GITHUB_SHA is not the current main head $($mainSha.Trim())."
@@ -46,14 +47,12 @@ jobs:
             if (-not [string]::Equals($tagSha.Trim(), $env:RELEASE_SHA, [System.StringComparison]::OrdinalIgnoreCase)) {
               continue
             }
-
             gh release view $tag --json tagName *> $null
             if ($LASTEXITCODE -eq 0) {
               $existingTag = $tag
               break
             }
           }
-
           if ([string]::IsNullOrWhiteSpace($existingTag)) {
             "skip=false" >> $env:GITHUB_OUTPUT
           } else {
@@ -95,235 +94,46 @@ jobs:
           "version=$next" >> $env:GITHUB_OUTPUT
           "previous_tag=$previousTag" >> $env:GITHUB_OUTPUT
 
-      - name: Bake release version
+      - name: Set up Rust
         if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $repository = "${{ github.repository }}"
-          $parts = $repository.Split("/")
-          if ($parts.Count -ne 2) {
-            throw "Unexpected repository format: $repository"
-          }
-          $source = @(
-            "namespace CodexUsageTray",
-            "{",
-            "    internal static class BuildVersion",
-            "    {",
-            "        public const string Version = `"$version`";",
-            "        public const string GitHubOwner = `"$($parts[0])`";",
-            "        public const string GitHubRepo = `"$($parts[1])`";",
-            "    }",
-            "}"
-          ) -join [Environment]::NewLine
-          Set-Content -Path "src\BuildVersion.cs" -Value $source -Encoding UTF8
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain installation failed." }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw "Could not select the stable Rust toolchain." }
 
-      - name: Build executable
+      - name: Check formatting
+        if: steps.release_guard.outputs.skip != 'true'
+        run: cargo fmt --check
+
+      - name: Run tests
+        if: steps.release_guard.outputs.skip != 'true'
+        run: cargo test --locked
+
+      - name: Run Clippy
+        if: steps.release_guard.outputs.skip != 'true'
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build release executable
+        if: steps.release_guard.outputs.skip != 'true'
+        env:
+          USAGE_TRAY_VERSION: ${{ steps.version.outputs.version }}
+        run: cargo build --locked --release
+
+      - name: Verify release executable
         if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $source = "CodexUsageTray.cs"
-          $sourceDir = "src"
-          $icon = "icon.ico"
-          $exe = "CodexUsageTray.exe"
-
-          if (-not (Test-Path -LiteralPath $source)) {
-            throw "Entrypoint source file not found: $source"
+          $asset = "target/release/usage-tray-rs.exe"
+          if (-not (Test-Path -LiteralPath $asset -PathType Leaf) -or (Get-Item -LiteralPath $asset).Length -le 0) {
+            throw "The Rust release executable is missing or empty: $asset"
           }
-          if (-not (Test-Path -LiteralPath $sourceDir)) {
-            throw "Source folder not found: $sourceDir"
-          }
-          if (-not (Test-Path -LiteralPath $icon)) {
-            throw "Icon file not found: $icon"
-          }
-
-          $sourceFiles = Get-ChildItem -LiteralPath $sourceDir -Filter "*.cs" |
-            Sort-Object Name |
-            Select-Object -ExpandProperty FullName
-          if (-not $sourceFiles) {
-            throw "No source files found in $sourceDir"
-          }
-
-          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
-          $candidates = @(
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
-          )
-          $compiler = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-          if (-not $compiler) {
-            throw "Could not find .NET Framework csc.exe."
-          }
-
-          $compilerArgs = @(
-            "/nologo",
-            "/langversion:5",
-            "/warnaserror+",
-            "/target:winexe",
-            "/optimize+",
-            "/platform:anycpu",
-            "/win32icon:$icon",
-            "/out:$exe",
-            "/reference:System.dll",
-            "/reference:System.Core.dll",
-            "/reference:System.Drawing.dll",
-            "/reference:System.Windows.Forms.dll",
-            "/reference:System.Web.Extensions.dll",
-            $source
-          ) + $sourceFiles
-
-          & $compiler $compilerArgs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Build failed with exit code $LASTEXITCODE."
-          }
-          if (-not (Test-Path -LiteralPath $exe)) {
-            throw "Build completed without creating $exe"
-          }
-
-      - name: Build and package WPF UI version
-        if: steps.release_guard.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $outputDir = Join-Path $env:RUNNER_TEMP ("codex-wpf-release-" + [guid]::NewGuid().ToString("N"))
-          dotnet build CodexUsageTray.Wpf.csproj --configuration Release --output $outputDir --warnaserror
-          if ($LASTEXITCODE -ne 0) { throw "WPF build failed with exit code $LASTEXITCODE." }
-
-          $files = @(
-            "CodexUsageTray.exe",
-            "CodexUsageTray.exe.config",
-            "System.Buffers.dll",
-            "System.Memory.dll",
-            "System.Numerics.Vectors.dll",
-            "System.Runtime.CompilerServices.Unsafe.dll",
-            "Wpf.Ui.Abstractions.dll",
-            "Wpf.Ui.dll"
-          )
-          foreach ($name in $files) {
-            $path = Join-Path $outputDir $name
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -le 0) {
-              throw "WPF package file is missing or empty: $name"
-            }
-          }
-          $expectedPaths = @($files | ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $outputDir $_)) })
-          $runtimeFiles = Get-ChildItem -LiteralPath $outputDir -Recurse -File | Where-Object {
-            $_.Extension -in @(".dll", ".exe") -or $_.Name -like "*.exe.config"
-          }
-          foreach ($file in $runtimeFiles) {
-            if ($expectedPaths -notcontains $file.FullName) { throw "Unexpected WPF runtime file: $($file.FullName)" }
-          }
-
-          Add-Type -AssemblyName System.IO.Compression
-          $archivePath = Join-Path (Get-Location).Path "CodexUsageTray-Wpf.zip"
-          $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::CreateNew)
-          try {
-            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
-            try {
-              foreach ($name in $files) {
-                $entry = $archive.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
-                $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
-                $inputStream = [System.IO.File]::OpenRead((Join-Path $outputDir $name))
-                try {
-                  $entryStream = $entry.Open()
-                  try { $inputStream.CopyTo($entryStream) } finally { $entryStream.Dispose() }
-                } finally { $inputStream.Dispose() }
-              }
-            } finally { $archive.Dispose() }
-          } finally { $stream.Dispose() }
-
-          $stream = [System.IO.File]::OpenRead($archivePath)
-          try {
-            $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read, $true)
-            try {
-              $actual = @($archive.Entries | ForEach-Object { $_.FullName })
-              if ($actual.Count -ne $files.Count -or (Compare-Object $files $actual)) {
-                throw "WPF package does not contain exactly the expected flat set of files."
-              }
-            } finally { $archive.Dispose() }
-          } finally { $stream.Dispose() }
-
-      - name: Validate updater script syntax
-        if: steps.release_guard.outputs.skip != 'true'
-        shell: powershell
-        run: |
-          $tempDir = Join-Path $env:RUNNER_TEMP ("codex-updater-parse-" + [guid]::NewGuid().ToString("N"))
-          New-Item -ItemType Directory -Path $tempDir | Out-Null
-          try {
-            $assembly = [Reflection.Assembly]::LoadFrom((Resolve-Path "CodexUsageTray.exe").Path)
-            $type = $assembly.GetType("CodexUsageTray.UpdateService", $true)
-            $method = $type.GetMethod(
-              "WriteUpdaterScript",
-              [Reflection.BindingFlags]"Static,NonPublic")
-            $script = [string](Join-Path $tempDir "update.ps1")
-            $staged = [string](Join-Path $tempDir "staged.exe")
-            $target = [string](Join-Path $tempDir "target.exe")
-            $backup = [string](Join-Path $tempDir "target.exe.bak")
-            $method.Invoke(
-              $null,
-              [object[]]@($script, $staged, $target, $backup, [int]12345))
-
-            $tokens = $null
-            $errors = $null
-            [void][Management.Automation.Language.Parser]::ParseFile(
-              $script,
-              [ref]$tokens,
-              [ref]$errors)
-            if ($errors.Count -ne 0) {
-              $errors | ForEach-Object { Write-Error $_.Message }
-              throw "Generated updater script has PowerShell syntax errors."
-            }
-          } finally {
-            Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Run usage parser tests
-        if: steps.release_guard.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $windowsDirectory = if ($env:WINDIR) { $env:WINDIR } else { $env:SystemRoot }
-          $compiler = @(
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
-            (Join-Path $windowsDirectory "Microsoft.NET\Framework\v4.0.30319\csc.exe")
-          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-          if (-not $compiler) {
-            throw "Could not find .NET Framework csc.exe."
-          }
-
-          $testExe = "CodexUsageTray.Tests.exe"
-          & $compiler `
-            /nologo `
-            /langversion:5 `
-            /target:exe `
-            /optimize+ `
-            "/out:$testExe" `
-            /reference:System.dll `
-            /reference:System.Core.dll `
-            /reference:System.Drawing.dll `
-            /reference:System.Windows.Forms.dll `
-            /reference:System.Web.Extensions.dll `
-            tests\*.cs `
-            src\*.cs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Test compilation failed with exit code $LASTEXITCODE."
-          }
-
-          & ".\$testExe" "tests\fixtures\rate-limits.json"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tests failed with exit code $LASTEXITCODE."
-          }
-
-      - name: Run WPF updater tests
-        if: steps.release_guard.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          dotnet build tests/WpfUpdater/WpfUpdater.Tests.csproj --configuration Release --warnaserror
-          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed to build with exit code $LASTEXITCODE." }
-          & .\tests\WpfUpdater\bin\Release\net481\WpfUpdater.Tests.exe
-          if ($LASTEXITCODE -ne 0) { throw "WPF updater tests failed with exit code $LASTEXITCODE." }
 
       - name: Generate release notes
         if: steps.release_guard.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $version = "${{ steps.version.outputs.version }}"
           $previousTag = "${{ steps.version.outputs.previous_tag }}"
           if ([string]::IsNullOrWhiteSpace($previousTag)) {
             $commits = @(git log --pretty=format:"- %s (%h)" --max-count=50)
@@ -339,19 +149,25 @@ jobs:
           ) + $commits + @(
             "",
             "## Download",
-            "- ``CodexUsageTray.exe`` is the classic single-file Windows tray app.",
-            "- ``CodexUsageTray-Wpf.zip`` contains the WPF UI version and its required files."
+            "- ``usage-tray-rs.exe`` is the standalone Windows tray app.",
+            "- Earlier C# installations need to download this executable separately; see the README for migration details."
           )
           Set-Content -Path "release_notes.md" -Value $notes -Encoding UTF8
 
       - name: Create GitHub release
         if: steps.release_guard.outputs.skip != 'true'
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch main before publication." }
+          $mainSha = [string](git rev-parse origin/main)
+          if (-not [string]::Equals($mainSha.Trim(), $env:GITHUB_SHA, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Release SHA $env:GITHUB_SHA is no longer the current main head $($mainSha.Trim())."
+          }
           gh release create "${{ steps.version.outputs.version }}" `
-            "CodexUsageTray.exe" `
-            "CodexUsageTray-Wpf.zip" `
+            "target/release/usage-tray-rs.exe" `
             --title "${{ steps.version.outputs.version }}" `
             --notes-file "release_notes.md" `
             --target "${{ github.sha }}" `

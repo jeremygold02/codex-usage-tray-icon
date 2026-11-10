@@ -106,7 +106,7 @@ fn main() -> io::Result<()> {
     let manifest = env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| Error::new(ErrorKind::NotFound, "CARGO_MANIFEST_DIR is missing"))?;
-    let icon_path = manifest.join("../icon.ico");
+    let icon_path = manifest.join("icon.ico");
     println!("cargo:rerun-if-changed={}", icon_path.display());
     let output_dir = env::var_os("OUT_DIR")
         .map(PathBuf::from)

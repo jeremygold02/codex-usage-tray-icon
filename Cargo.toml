@@ -4,7 +4,7 @@
 name = "usage-tray-rs"
 version = "0.1.0"
 edition = "2021"
-description = "Rust prototype of Codex Usage Tray"
+description = "Native Windows tray utility for Codex and Claude usage"
 publish = false
 
 [dependencies]

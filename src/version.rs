@@ -9,18 +9,16 @@ use std::cmp::Ordering;
 /// What a development build reports, and what unreadable version text means.
 pub const BASE_VERSION: &str = "0.1.0";
 
-/// The only release asset this build installs. The C# builds publish
-/// `CodexUsageTray.exe` and `CodexUsageTray-Wpf.zip` in the same releases;
-/// neither is ever downloaded here.
+/// The release asset installed by the updater. Historical C# release assets
+/// use different names and are not compatible with this executable.
 pub const RELEASE_ASSET_NAME: &str = "usage-tray-rs.exe";
 
 pub const GITHUB_OWNER: &str = "jeremygold02";
 pub const GITHUB_REPO: &str = "codex-usage-tray-icon";
 
 /// The version of this build: the package version, unless the build set
-/// `USAGE_TRAY_VERSION` to name the release it was made from. The C# app
-/// honours its equivalent, `LocalWpfVersion`, only on development builds;
-/// here the variable always wins, because nothing else stamps a release.
+/// `USAGE_TRAY_VERSION` to name the release it was made from. The release
+/// workflow sets the variable to the version it publishes.
 pub fn current() -> String {
     resolve(env!("CARGO_PKG_VERSION"), option_env!("USAGE_TRAY_VERSION"))
 }
