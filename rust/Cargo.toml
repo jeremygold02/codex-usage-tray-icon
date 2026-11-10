@@ -1,0 +1,47 @@
+[package]
+# The executable name must not start with "codex": the existing tray app (and
+# this one) treat any such process as a running Codex CLI.
+name = "usage-tray-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust prototype of Codex Usage Tray"
+publish = false
+
+[dependencies]
+# float_roundtrip: history files hold 17-digit percentages that must be read
+# back exactly, or saved files drift from what the C# app wrote.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
