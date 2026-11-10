@@ -53,12 +53,12 @@ namespace CodexUsageTray
             this.cleanup = cleanup;
         }
 
-        public bool TryStart(bool settingsOpen)
+        public bool TryStart(bool shouldWait)
         {
             lock (sync)
             {
                 if (finished) throw new ObjectDisposedException("PreparedUpdate");
-                if (settingsOpen) return false;
+                if (shouldWait) return false;
                 start();
                 finished = true;
                 return true;

@@ -41,6 +41,7 @@ namespace CodexUsageTray
         private readonly System.Windows.Forms.Timer autoRedemptionTimer;
         private readonly System.Windows.Forms.Timer activityTimer;
         private readonly System.Windows.Forms.Timer updateTimer;
+        private readonly System.Windows.Forms.Timer updateRestartTimer;
         private readonly System.Windows.Forms.Timer resetReminderTimer;
         private readonly ResetExpiryReminder resetExpiryReminder;
         private readonly UsageHistoryStore usageHistory;
@@ -174,6 +175,10 @@ namespace CodexUsageTray
             updateTimer.Interval = UpdateCheckIntervalMilliseconds;
             updateTimer.Tick += delegate { CheckForUpdates(false); };
             updateTimer.Start();
+
+            updateRestartTimer = new System.Windows.Forms.Timer();
+            updateRestartTimer.Interval = 1000;
+            updateRestartTimer.Tick += delegate { StartPendingUpdate(); };
 
             RefreshClaudeUsage();
             RefreshUsageIfDue(false);
@@ -1989,15 +1994,20 @@ namespace CodexUsageTray
             if (shuttingDown || pendingUpdate == null) return;
             try
             {
-                if (!pendingUpdate.TryStart(settingsForm != null && !settingsForm.IsDisposed))
+                if (!pendingUpdate.TryStart(ShouldWaitForSettings(settingsForm, pendingUpdateInteractive)))
                 {
-                    SetUpdateStatusText("Update ready. Save or close Settings to restart.");
+                    SetUpdateStatusText(pendingUpdateInteractive
+                        ? "Update ready. Save or discard your Settings changes to restart."
+                        : "Update ready. Close Settings to restart.");
+                    if (pendingUpdateInteractive) updateRestartTimer.Start();
                     return;
                 }
+                updateRestartTimer.Stop();
                 pendingUpdate = null;
             }
             catch (Exception error)
             {
+                updateRestartTimer.Stop();
                 pendingUpdate.Dispose();
                 pendingUpdate = null;
                 updateInstallInProgress = false;
@@ -2006,6 +2016,11 @@ namespace CodexUsageTray
                 return;
             }
             ExitThread();
+        }
+
+        internal static bool ShouldWaitForSettings(SettingsForm form, bool interactive)
+        {
+            return form != null && !form.IsDisposed && (!interactive || form.HasUnsavedChanges);
         }
 
         private void HandleUpdateInstallError(Exception error, bool interactive)
@@ -2104,6 +2119,8 @@ namespace CodexUsageTray
             activityTimer.Dispose();
             updateTimer.Stop();
             updateTimer.Dispose();
+            updateRestartTimer.Stop();
+            updateRestartTimer.Dispose();
             if (startupUiTimer != null)
             {
                 startupUiTimer.Stop();

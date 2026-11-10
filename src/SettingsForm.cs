@@ -58,6 +58,8 @@ namespace CodexUsageTray
         private int selectedPage;
         private bool uiInitialized;
         private bool applyingSystemTheme;
+        private bool choosingColor;
+        private object[] savedDraftValues;
 
         public event EventHandler SettingsApplied;
         public event EventHandler CheckUpdatesRequested;
@@ -103,6 +105,39 @@ namespace CodexUsageTray
 #if WPF_UI
             InitializeWpfSettings();
 #endif
+            savedDraftValues = GetDraftValues();
+        }
+
+        internal bool HasUnsavedChanges
+        {
+            get
+            {
+                if (choosingColor) return true;
+#if WPF_UI
+                if (wpfHost != null && wpfHost.Visible && wpfSettings.HasUncommittedNumericInput()) return true;
+#endif
+                object[] current = GetDraftValues();
+                if (savedDraftValues == null || savedDraftValues.Length != current.Length) return true;
+                for (int index = 0; index < current.Length; index++)
+                    if (!object.Equals(savedDraftValues[index], current[index])) return true;
+                return false;
+            }
+        }
+
+        private object[] GetDraftValues()
+        {
+            return new object[]
+            {
+                criticalNumeric.Text, lowNumeric.Text, refreshNumeric.Text, idleRefreshNumeric.Text,
+                autoRedeemLeadNumeric.Text, resetExpiryLeadNumeric.Text,
+                weeklyRadio.Checked, fiveHourRadio.Checked, autoMetricRadio.Checked,
+                resetExpiryRemindersCheckBox.Checked, colorBarsCheckBox.Checked,
+                showResetTimesCheckBox.Checked, showLastUpdatedCheckBox.Checked, startWithWindowsCheckBox.Checked,
+                thresholdNotificationsCheckBox.Checked, autoRedeemResetCreditsCheckBox.Checked,
+                showTrayBoxCheckBox.Checked, useCustomTrayBoxColor, trayBoxColor.ToArgb(), trayTextColor.ToArgb(),
+                themeCombo.SelectedIndex, learnedRoutineRadio.Checked, recentPaceRadio.Checked,
+                quietHoursCombo.SelectedIndex, showProjectedUsageCheckBox.Checked, highlightQuietHoursCheckBox.Checked
+            };
         }
 
         protected override void Dispose(bool disposing)
@@ -900,6 +935,7 @@ namespace CodexUsageTray
             }
 
             settings.CopyValuesFrom(candidate);
+            savedDraftValues = GetDraftValues();
 
             if (SettingsApplied != null)
             {
@@ -1043,7 +1079,11 @@ namespace CodexUsageTray
             {
                 dialog.FullOpen = true;
                 dialog.Color = currentColor;
-                if (dialog.ShowDialog(this) == DialogResult.OK)
+                DialogResult result;
+                choosingColor = true;
+                try { result = dialog.ShowDialog(this); }
+                finally { choosingColor = false; }
+                if (result == DialogResult.OK)
                 {
                     selectedColor = dialog.Color;
                     return true;

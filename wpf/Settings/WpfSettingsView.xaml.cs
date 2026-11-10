@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -44,6 +45,20 @@ namespace CodexUsageTray
             var radio = sender as RadioButton;
             if (radio != null && radio.IsChecked != true) return;
             if (!Synchronizing && owner != null) owner.WpfInputChanged(sender);
+        }
+
+        internal bool HasUncommittedNumericInput()
+        {
+            NumberBox[] numbers = { CriticalValue, LowValue, ReminderHours, AutoUseMinutes, RunningRefresh, IdleRefresh };
+            foreach (NumberBox number in numbers)
+            {
+                if (!number.IsLoaded) continue;
+                double input;
+                if (!double.TryParse(number.Text, NumberStyles.Float | NumberStyles.AllowThousands,
+                        CultureInfo.CurrentCulture, out input) || !number.Value.HasValue || input != number.Value.Value)
+                    return true;
+            }
+            return false;
         }
 
         internal void ApplyTheme(bool dark)

@@ -135,6 +135,37 @@ namespace CodexUsageTray.Tests
                     "system color changes reapply the selected settings theme without saving");
                 PrepareHiddenForm(form);
                 Application.DoEvents();
+                Assert(!form.HasUnsavedChanges && !TrayAppContext.ShouldWaitForSettings(form, true) &&
+                    TrayAppContext.ShouldWaitForSettings(form, false),
+                    "a manual update can restart with unchanged settings while a background update waits");
+                NumericUpDown sample = (NumericUpDown)Field(form, "previewPercentNumeric");
+                decimal preview = sample.Value;
+                sample.Value = 17;
+                Assert(!form.HasUnsavedChanges, "changing the preview alone does not create an unsaved setting");
+                sample.Value = preview;
+                NumericUpDown pendingNumber = (NumericUpDown)Field(form, "criticalNumeric");
+                string originalNumberText = pendingNumber.Text;
+                pendingNumber.Text = originalNumberText == "18" ? "19" : "18";
+                Assert(form.HasUnsavedChanges, "uncommitted numeric text prevents a manual restart");
+                pendingNumber.Text = originalNumberText;
+                Assert(!form.HasUnsavedChanges, "reverting uncommitted numeric text clears the draft");
+                CheckBox popupTimes = (CheckBox)Field(form, "showResetTimesCheckBox");
+                bool originalTimes = popupTimes.Checked;
+                popupTimes.Checked = !originalTimes;
+                Assert(form.HasUnsavedChanges && TrayAppContext.ShouldWaitForSettings(form, true),
+                    "a manual update waits for an edited setting");
+                popupTimes.Checked = originalTimes;
+                Assert(!form.HasUnsavedChanges, "reverting an edit permits the update to continue");
+                FieldInfo colorField = typeof(SettingsForm).GetField("trayTextColor", BindingFlags.NonPublic | BindingFlags.Instance);
+                Color originalTextColor = (Color)colorField.GetValue(form);
+                colorField.SetValue(form, Color.Magenta);
+                Assert(form.HasUnsavedChanges, "custom color changes are protected");
+                colorField.SetValue(form, originalTextColor);
+                FieldInfo choosingColor = typeof(SettingsForm).GetField("choosingColor", BindingFlags.NonPublic | BindingFlags.Instance);
+                choosingColor.SetValue(form, true);
+                Assert(form.HasUnsavedChanges, "an open color picker postpones restart");
+                choosingColor.SetValue(form, false);
+                Assert(!form.HasUnsavedChanges, "canceling an unchanged color picker permits restart");
                 Button[] navigation = (Button[])Field(form, "navigationButtons");
                 Control[] pages = (Control[])Field(form, "pages");
                 for (int i = 0; i < navigation.Length; i++)
@@ -198,6 +229,7 @@ namespace CodexUsageTray.Tests
                 Assert(applied && saves == 1 && settings.ForecastMethod == AppSettings.ForecastRecentPace &&
                     !settings.ShowProjectedUsage && persisted.ForecastMethod == AppSettings.ForecastRecentPace && !persisted.ShowProjectedUsage,
                     "save persists and applies forecast controls");
+                Assert(!form.HasUnsavedChanges, "a successful save updates the draft baseline");
                 form.Close();
             }
             using (SettingsForm form = new SettingsForm(settings, delegate(AppSettings candidate) { saves++; }))

@@ -289,6 +289,26 @@ namespace CodexUsageTray
                 var view = (WpfSettingsView)settingsHost.Child;
                 CaptureWpf(settingsHost, output, "settings-wpf");
                 Check(!saved, "Constructing settings does not save");
+                Check(!settingsForm.HasUnsavedChanges && !TrayAppContext.ShouldWaitForSettings(settingsForm, true) &&
+                    TrayAppContext.ShouldWaitForSettings(settingsForm, false), "Manual updates can restart with unchanged WPF settings");
+                SelectSettingsPage(view, "Usage");
+                Pump();
+                string initialNumericText = view.CriticalValue.Text;
+                view.CriticalValue.Text = "18";
+                Check(settingsForm.HasUnsavedChanges && TrayAppContext.ShouldWaitForSettings(settingsForm, true),
+                    "Uncommitted WPF numeric text prevents a manual update restart");
+                view.CriticalValue.Text = initialNumericText;
+                Check(!settingsForm.HasUnsavedChanges, "Reverting WPF numeric text clears the pending edit");
+                int updateStarts = 0;
+                var preparedUpdate = new PreparedUpdate(delegate { updateStarts++; }, delegate { });
+                bool originalAlerts = view.ThresholdAlerts.IsChecked == true;
+                view.ThresholdAlerts.IsChecked = !originalAlerts;
+                Check(!preparedUpdate.TryStart(TrayAppContext.ShouldWaitForSettings(settingsForm, true)) && updateStarts == 0,
+                    "Edits made while the update is preparing defer its restart");
+                view.ThresholdAlerts.IsChecked = originalAlerts;
+                Check(preparedUpdate.TryStart(TrayAppContext.ShouldWaitForSettings(settingsForm, true)) && updateStarts == 1,
+                    "Reverting those edits lets the prepared update start");
+                preparedUpdate.Dispose();
                 SelectSettingsPage(view, "Forecast");
                 Check(view.ForecastPanel.Visibility == Visibility.Visible && view.PageTitle.Text == "Forecast & graphs", "Forecast navigation");
                 CaptureWpf(settingsHost, output, "settings-forecast-wpf");
