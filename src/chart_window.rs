@@ -30,12 +30,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetMessageW, IsIconic, LoadCursorW, LoadIconW, PostMessageW, PostQuitMessage,
     RegisterClassExW, ReplyMessage, SendMessageTimeoutW, SetCursor, SetForegroundWindow,
     SetWindowPos, ShowWindow, TranslateMessage, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    IDI_APPLICATION, MINMAXINFO, MSG, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE,
-    SW_SHOWNORMAL, WINDOW_STYLE, WM_CAPTURECHANGED, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU,
-    WS_THICKFRAME,
+    MINMAXINFO, MSG, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOWNORMAL,
+    WINDOW_STYLE, WM_CAPTURECHANGED, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE,
+    WM_THEMECHANGED, WNDCLASSEXW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::chart_data::{ChartData, ChartProvider};
@@ -48,7 +47,7 @@ use crate::ipc::{
 };
 use crate::localtime::TimeZone;
 use crate::settings::system_uses_dark_theme;
-use crate::win::wide;
+use crate::win::{wide, APP_ICON_RESOURCE};
 
 const STYLE: WINDOW_STYLE = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -180,7 +179,7 @@ pub fn run(launch: Launch) {
         class.cbSize = size_of::<WNDCLASSEXW>() as u32;
         class.lpfnWndProc = Some(window_procedure);
         class.hInstance = instance;
-        class.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
+        class.hIcon = LoadIconW(instance, APP_ICON_RESOURCE);
         class.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
         class.lpszClassName = class_name;
         if RegisterClassExW(&class) == 0 {

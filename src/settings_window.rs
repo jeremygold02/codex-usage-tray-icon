@@ -42,13 +42,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCaretBlinkTime, GetClientRect, GetCursorPos, GetMessageW, IsIconic, KillTimer, LoadCursorW,
     LoadIconW, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassExW, ReplyMessage,
     SendMessageTimeoutW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    TranslateMessage, CS_DBLCLKS, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDI_APPLICATION,
-    MB_ICONWARNING, MB_OK, MINMAXINFO, MSG, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_RESTORE, SW_SHOWNORMAL, WHEEL_DELTA, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_COPYDATA,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
+    TranslateMessage, CS_DBLCLKS, HTCLIENT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MB_ICONWARNING, MB_OK,
+    MINMAXINFO, MSG, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOWNORMAL,
+    WHEEL_DELTA, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW,
+    WS_CAPTION, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::controls::Cursor;
@@ -62,7 +62,7 @@ use crate::settings::{system_uses_dark_theme, Settings};
 use crate::settings_view::{
     caption_color, ColorTarget, Command, Key, Status, View, CLIENT_SIZE, MIN_WINDOW_SIZE,
 };
-use crate::win::wide;
+use crate::win::{wide, APP_ICON_RESOURCE};
 
 const CLASS_NAME: *const u16 = w!("UsageTrayRs.Settings");
 const TITLE: *const u16 = w!("Codex Usage Tray Settings");
@@ -223,7 +223,7 @@ pub fn run(launch: Launch) {
         class.style = CS_DBLCLKS;
         class.lpfnWndProc = Some(window_procedure);
         class.hInstance = instance;
-        class.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
+        class.hIcon = LoadIconW(instance, APP_ICON_RESOURCE);
         class.hCursor = LoadCursorW(null_mut(), IDC_ARROW);
         class.lpszClassName = CLASS_NAME;
         if RegisterClassExW(&class) == 0 {
